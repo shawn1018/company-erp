@@ -1,5 +1,5 @@
 import streamlit as st
-import pandas as pd
+import pandas as p
 from datetime import datetime, date
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
