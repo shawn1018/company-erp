@@ -1,10 +1,11 @@
 import streamlit as st
 import pandas as pd
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 import json
-import plotly.graph_objects as go # 改用更強大的繪圖模組
+import plotly.graph_objects as go
+import plotly.express as px # 引入這一位來畫甘特圖
 
 # ==========================================
 # 1. Google Sheets 連線設定
@@ -32,15 +33,17 @@ def init_sheets(sheet):
         except:
             ws_trans = sheet.add_worksheet(title="Transactions", rows=1000, cols=10)
             ws_trans.append_row(["date", "type", "category", "amount", "note", "project_name", "created_at"])
+        
         try: ws_projs = sheet.worksheet("Projects")
         except:
             ws_projs = sheet.add_worksheet(title="Projects", rows=100, cols=10)
-            ws_projs.append_row(["name", "total_budget", "start_date", "status", "progress", "created_at"])
+            # V8 新增 end_date 欄位
+            ws_projs.append_row(["name", "total_budget", "start_date", "status", "progress", "created_at", "end_date"])
         return ws_trans, ws_projs
     except: return None, None
 
-st.set_page_config(page_title="雲端公司中控台", layout="wide", page_icon="📈")
-st.title("☁️ 公司營運中控台 (單圖決策版)")
+st.set_page_config(page_title="雲端公司中控台", layout="wide", page_icon="🗓")
+st.title("☁️ 公司營運中控台 (V8 時程甘特圖版)")
 
 sh = connect_google_sheet()
 if not sh: st.stop()
@@ -51,22 +54,33 @@ raw_trans = ws_trans.get_all_values()
 df_trans = pd.DataFrame(raw_trans[1:], columns=raw_trans[0]) if len(raw_trans) > 1 else pd.DataFrame(columns=["date", "type", "category", "amount", "note", "project_name", "created_at"])
 
 raw_projs = ws_projs.get_all_values()
-df_projs = pd.DataFrame(raw_projs[1:], columns=raw_projs[0]) if len(raw_projs) > 1 else pd.DataFrame(columns=["name", "total_budget", "start_date", "status", "progress", "created_at"])
+# 為了相容舊資料，如果舊資料沒有 end_date 欄位，我們手動補上
+if len(raw_projs) > 1:
+    cols = raw_projs[0]
+    if "end_date" not in cols: cols.append("end_date") # 防呆
+    df_projs = pd.DataFrame(raw_projs[1:], columns=cols)
+else:
+    df_projs = pd.DataFrame(columns=["name", "total_budget", "start_date", "status", "progress", "created_at", "end_date"])
 
 # 資料轉型
 if not df_trans.empty:
     df_trans['amount'] = pd.to_numeric(df_trans['amount'], errors='coerce').fillna(0)
     df_trans['date'] = pd.to_datetime(df_trans['date'], errors='coerce')
+
 if not df_projs.empty:
     df_projs['total_budget'] = pd.to_numeric(df_projs['total_budget'], errors='coerce').fillna(0)
     df_projs['progress'] = pd.to_numeric(df_projs['progress'], errors='coerce').fillna(0)
+    df_projs['start_date'] = pd.to_datetime(df_projs['start_date'], errors='coerce')
+    # 如果沒有結束日期，預設為開始日期 + 30天 (避免畫圖報錯)
+    if 'end_date' not in df_projs.columns: df_projs['end_date'] = df_projs['start_date'] + timedelta(days=30)
+    df_projs['end_date'] = pd.to_datetime(df_projs['end_date'], errors='coerce').fillna(df_projs['start_date'] + timedelta(days=30))
 
 # ==========================================
-# 2. 戰情儀表板 (The Master Chart)
+# 2. 戰情儀表板
 # ==========================================
 today = datetime.today()
 
-# 計算本月 KPI
+# KPI 計算
 if not df_trans.empty:
     mask_month = (df_trans['date'].dt.year == today.year) & (df_trans['date'].dt.month == today.month)
     df_month = df_trans[mask_month]
@@ -77,7 +91,6 @@ if not df_trans.empty:
 else:
     m_income = m_expense = m_balance = total_balance = 0
 
-# 顯示 KPI
 col1, col2, col3, col4 = st.columns(4)
 col1.metric("📅 本月營收", f"${m_income:,.0f}")
 col2.metric("💸 本月開銷", f"${m_expense:,.0f}")
@@ -86,78 +99,66 @@ col4.metric("🏦 總資金水位", f"${total_balance:,.0f}")
 
 st.divider()
 
-# --- 繪製「終極單一圖表」 ---
-if not df_trans.empty:
-    # 1. 資料處理：按月份分組
-    df_chart = df_trans.copy()
-    df_chart['Month'] = df_chart['date'].dt.strftime('%Y-%m')
-    
-    # 計算每月的收入與支出
-    monthly_stats = df_chart.groupby(['Month', 'type'])['amount'].sum().unstack(fill_value=0)
-    if '收入' not in monthly_stats.columns: monthly_stats['收入'] = 0
-    if '支出' not in monthly_stats.columns: monthly_stats['支出'] = 0
-    
-    # 計算每月淨利與累計資金水位
-    monthly_stats['Net'] = monthly_stats['收入'] - monthly_stats['支出']
-    monthly_stats['Cumulative'] = monthly_stats['Net'].cumsum()
-    
-    # 2. 開始畫圖
-    fig = go.Figure()
+# --- 圖表區 (雙欄) ---
+chart_c1, chart_c2 = st.columns(2)
 
-    # 柱狀圖：收入 (綠色)
-    fig.add_trace(go.Bar(
-        x=monthly_stats.index, 
-        y=monthly_stats['收入'],
-        name='收入 (Income)',
-        marker_color='#00CC96'
-    ))
+# 左圖：財務全景圖 (V7 的圖)
+with chart_c1:
+    st.subheader("💰 財務全景圖")
+    if not df_trans.empty:
+        df_chart = df_trans.copy()
+        df_chart['Month'] = df_chart['date'].dt.strftime('%Y-%m')
+        monthly_stats = df_chart.groupby(['Month', 'type'])['amount'].sum().unstack(fill_value=0)
+        if '收入' not in monthly_stats.columns: monthly_stats['收入'] = 0
+        if '支出' not in monthly_stats.columns: monthly_stats['支出'] = 0
+        monthly_stats['Cumulative'] = (monthly_stats['收入'] - monthly_stats['支出']).cumsum()
+        
+        fig = go.Figure()
+        fig.add_trace(go.Bar(x=monthly_stats.index, y=monthly_stats['收入'], name='收入', marker_color='#00CC96'))
+        fig.add_trace(go.Bar(x=monthly_stats.index, y=monthly_stats['支出'], name='支出', marker_color='#EF553B'))
+        fig.add_trace(go.Scatter(x=monthly_stats.index, y=monthly_stats['Cumulative'], name='資金水位', mode='lines+markers', line=dict(color='#636EFA', width=3), yaxis='y2'))
+        fig.update_layout(
+            yaxis=dict(title='單月收支', side='left'),
+            yaxis2=dict(title='累計水位', side='right', overlaying='y', showgrid=False),
+            barmode='group', legend=dict(orientation="h", y=1.1, x=0), margin=dict(l=0, r=0, t=30, b=0), height=350
+        )
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.info("暫無財務資料")
 
-    # 柱狀圖：支出 (紅色)
-    fig.add_trace(go.Bar(
-        x=monthly_stats.index, 
-        y=monthly_stats['支出'],
-        name='支出 (Expense)',
-        marker_color='#EF553B'
-    ))
-
-    # 折線圖：資金水位 (藍色線，使用右邊的 Y 軸)
-    fig.add_trace(go.Scatter(
-        x=monthly_stats.index, 
-        y=monthly_stats['Cumulative'],
-        name='💰 資金水位 (Total Balance)',
-        mode='lines+markers',
-        line=dict(color='#636EFA', width=4),
-        marker=dict(size=8),
-        yaxis='y2' # 指定使用第二個 Y 軸
-    ))
-
-    # 3. 版面設定 (雙 Y 軸)
-    fig.update_layout(
-        title='公司財務全景圖 (月收支 vs 資金累計)',
-        xaxis=dict(title='月份'),
-        yaxis=dict(title='單月收支金額', side='left'),
-        yaxis2=dict(
-            title='累計資金水位', 
-            side='right', 
-            overlaying='y', # 疊加在原本的圖上
-            showgrid=False  # 隱藏網格以免混亂
-        ),
-        barmode='group', # 收入支出的柱子並排顯示
-        legend=dict(orientation="h", y=1.1, x=0), # 圖例放上面
-        height=500
-    )
-    
-    st.plotly_chart(fig, use_container_width=True)
-
-else:
-    st.info("💡 請先輸入記帳資料，全景圖將自動生成。")
+# 右圖：專案時程甘特圖 (V8 新增)
+with chart_c2:
+    st.subheader("🗓 專案排程 (甘特圖)")
+    if not df_projs.empty:
+        # 使用 Plotly Express 畫甘特圖
+        # 顏色依照「狀態」區分，讓人一眼看出哪些在進行中
+        fig_gantt = px.timeline(
+            df_projs, 
+            x_start="start_date", 
+            x_end="end_date", 
+            y="name", 
+            color="status",
+            title="",
+            labels={"name": "專案名稱", "start_date": "開始", "end_date": "結束", "status": "狀態"},
+            color_discrete_map={"進行中": "#00CC96", "暫停": "#FFA15A", "結案": "#AB63FA"}
+        )
+        # 讓Y軸依照專案順序排列 (不要亂跳)，且隱藏下方滑桿
+        fig_gantt.update_yaxes(autorange="reversed") 
+        fig_gantt.update_layout(
+            xaxis_title="日期區間",
+            margin=dict(l=0, r=0, t=30, b=0),
+            height=350
+        )
+        st.plotly_chart(fig_gantt, use_container_width=True)
+    else:
+        st.info("暫無專案資料，請至專案管理新增。")
 
 st.divider()
 
 # ==========================================
-# 3. 功能分頁 (保持原樣，僅壓縮排版)
+# 3. 功能分頁
 # ==========================================
-tab1, tab2, tab3 = st.tabs(["🏗 專案管理", "✍️ 雲端記帳", "📋 報表修改"])
+tab1, tab2, tab3 = st.tabs(["🏗 專案管理 (新增時程)", "✍️ 雲端記帳", "📋 報表修改"])
 
 with tab1: 
     c1, c2 = st.columns([1, 2])
@@ -168,8 +169,18 @@ with tab1:
             p_budget = st.number_input("預算", min_value=0)
             p_status = st.selectbox("狀態", ["進行中", "結案", "暫停"])
             p_progress = st.slider("進度", 0, 100, 0)
+            
+            # V8 新增：時間選擇器
+            st.write("⏱ **專案時程規劃**")
+            col_d1, col_d2 = st.columns(2)
+            p_start = col_d1.date_input("開始日期", date.today())
+            p_end = col_d2.date_input("預計結束", date.today() + timedelta(days=30))
+
             if st.form_submit_button("上傳"):
-                ws_projs.append_row([p_name, p_budget, str(date.today()), p_status, p_progress, str(datetime.now())])
+                # 寫入包含 end_date 的資料
+                ws_projs.append_row([
+                    p_name, p_budget, str(p_start), p_status, p_progress, str(datetime.now()), str(p_end)
+                ])
                 st.success("成功"); st.rerun()
     with c2:
         st.subheader("專案列表")
@@ -181,10 +192,23 @@ with tab1:
                     p_trans = df_trans[df_trans['project_name'] == row['name']]
                     p_cost = p_trans[p_trans['type'] == '支出']['amount'].sum()
                     p_rev = p_trans[p_trans['type'] == '收入']['amount'].sum()
-                proj_view.append({"專案": row['name'], "預算": f"${row['total_budget']:,.0f}", "狀態": row['status'], "進度": f"{row['progress']}%", "已投入": f"${p_cost:,.0f}", "獲利": p_rev - p_cost})
+                
+                # 顯示日期區間
+                s_str = row['start_date'].strftime('%Y/%m/%d') if pd.notnull(row['start_date']) else ""
+                e_str = row['end_date'].strftime('%Y/%m/%d') if pd.notnull(row['end_date']) else ""
+                
+                proj_view.append({
+                    "專案": row['name'], 
+                    "時程": f"{s_str} ~ {e_str}", # 新增顯示
+                    "預算": f"${row['total_budget']:,.0f}", 
+                    "狀態": row['status'], 
+                    "進度": f"{row['progress']}%", 
+                    "已投入": f"${p_cost:,.0f}", 
+                    "獲利": p_rev - p_cost
+                })
             st.dataframe(pd.DataFrame(proj_view), use_container_width=True)
             
-            st.write("🛠 **修改或刪除專案**")
+            st.write("🛠 **修改專案 (含時程)**")
             proj_opts = {f"Row {i+1}: {r[0]}": i+1 for i, r in enumerate(raw_projs) if i>0}
             sel_proj = st.selectbox("選擇專案", list(proj_opts.keys()))
             if sel_proj:
@@ -193,11 +217,29 @@ with tab1:
                 with st.form("edit_p"):
                     es = st.selectbox("狀態", ["進行中", "結案", "暫停"], index=["進行中", "結案", "暫停"].index(curr[3]) if curr[3] in ["進行中", "結案", "暫停"] else 0)
                     ep = st.slider("進度", 0, 100, int(float(curr[4])))
+                    
+                    # 讀取舊的日期，如果沒有就用今天
+                    try: old_start = datetime.strptime(curr[2], "%Y-%m-%d").date()
+                    except: old_start = date.today()
+                    # end_date 是第 7 欄 (index 6)，如果舊資料沒有這一欄，要防呆
+                    try: old_end = datetime.strptime(curr[6], "%Y-%m-%d").date()
+                    except: old_end = old_start + timedelta(days=30)
+
+                    ed1, ed2 = st.columns(2)
+                    new_start = ed1.date_input("更新開始日", old_start)
+                    new_end = ed2.date_input("更新結束日", old_end)
+
                     c_e, c_d = st.columns(2)
-                    if c_e.form_submit_button("💾 更新"): ws_projs.update_cell(r_num, 4, es); ws_projs.update_cell(r_num, 5, ep); st.rerun()
+                    if c_e.form_submit_button("💾 更新"): 
+                        # 更新 Column 3 (start), 4 (status), 5 (progress), 7 (end)
+                        ws_projs.update_cell(r_num, 3, str(new_start))
+                        ws_projs.update_cell(r_num, 4, es)
+                        ws_projs.update_cell(r_num, 5, ep)
+                        ws_projs.update_cell(r_num, 7, str(new_end)) # 更新結束日期
+                        st.rerun()
                     if c_d.form_submit_button("🗑 刪除", type="primary"): ws_projs.delete_rows(r_num); st.rerun()
 
-with tab2:
+with tab2: # 記帳 (維持 V7)
     if 'form_type' not in st.session_state: st.session_state.form_type = "支出"
     if 'form_cat' not in st.session_state: st.session_state.form_cat = "專案款"
     if 'form_note' not in st.session_state: st.session_state.form_note = ""
@@ -214,7 +256,7 @@ with tab2:
         c4, c5 = st.columns(2); am = c4.number_input("金額", min_value=0); pr = c5.selectbox("歸屬", p_list); no = st.text_input("備註", value=st.session_state.form_note)
         if st.form_submit_button("寫入雲端"): ws_trans.append_row([str(d), ty, ca, am, no, pr, str(datetime.now())]); st.success("成功"); st.session_state.form_note=""; st.rerun()
 
-with tab3:
+with tab3: # 報表 (維持 V7)
     if len(raw_trans) > 1:
         st.dataframe(df_trans, use_container_width=True)
         st.divider()
