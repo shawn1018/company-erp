@@ -6,7 +6,7 @@ from oauth2client.service_account import ServiceAccountCredentials
 import json
 
 # ==========================================
-# 1. Google Sheets 連線設定 (安全版)
+# 1. Google Sheets 連線設定
 # ==========================================
 SCOPE = ['https://www.googleapis.com/auth/spreadsheets',
          'https://www.googleapis.com/auth/drive']
@@ -14,8 +14,6 @@ SCOPE = ['https://www.googleapis.com/auth/spreadsheets',
 def connect_google_sheet():
     """連線到 Google 試算表"""
     try:
-        # 從 Streamlit Cloud 的 Secrets 讀取鑰匙
-        # 如果是在本機執行且沒有設 secrets，請確保有 .streamlit/secrets.toml 或改回用檔案讀取
         if "google_key" in st.secrets:
             key_dict = json.loads(st.secrets["google_key"])
             creds = ServiceAccountCredentials.from_json_keyfile_dict(key_dict, SCOPE)
@@ -33,14 +31,12 @@ def connect_google_sheet():
 def init_sheets(sheet):
     """初始化欄位"""
     try:
-        # Transactions 分頁
         try:
             ws_trans = sheet.worksheet("Transactions")
         except:
             ws_trans = sheet.add_worksheet(title="Transactions", rows=1000, cols=10)
             ws_trans.append_row(["date", "type", "category", "amount", "note", "project_name", "created_at"])
 
-        # Projects 分頁
         try:
             ws_projs = sheet.worksheet("Projects")
         except:
@@ -54,7 +50,7 @@ def init_sheets(sheet):
 
 # 設定頁面
 st.set_page_config(page_title="雲端公司中控台", layout="wide", page_icon="☁️")
-st.title("☁️ 公司營運中控台 (Web完整版)")
+st.title("☁️ 公司營運中控台 (Web版)")
 
 # 連線
 sh = connect_google_sheet()
@@ -63,15 +59,13 @@ if not sh:
 
 ws_trans, ws_projs = init_sheets(sh)
 
-# 讀取資料 (使用 get_all_values 以便取得列號)
-# Transactions
+# 讀取資料
 raw_trans = ws_trans.get_all_values()
 if len(raw_trans) > 1:
     df_trans = pd.DataFrame(raw_trans[1:], columns=raw_trans[0])
 else:
     df_trans = pd.DataFrame(columns=["date", "type", "category", "amount", "note", "project_name", "created_at"])
 
-# Projects
 raw_projs = ws_projs.get_all_values()
 if len(raw_projs) > 1:
     df_projs = pd.DataFrame(raw_projs[1:], columns=raw_projs[0])
@@ -110,7 +104,7 @@ st.divider()
 # ==========================================
 # 3. 功能分頁
 # ==========================================
-tab1, tab2, tab3 = st.tabs(["🏗 專案管理 (含修改)", "✍️ 雲端記帳", "📋 報表修改與刪除"])
+tab1, tab2, tab3 = st.tabs(["🏗 專案管理", "✍️ 雲端記帳", "📋 報表修改"])
 
 # --- Tab 1: 專案管理 ---
 with tab1: 
@@ -121,7 +115,7 @@ with tab1:
         st.subheader("新增專案")
         with st.form("add_proj"):
             p_name = st.text_input("專案名稱")
-            p_budget = st.number_input("預算", min_value=0)
+            p_budget = st.number_input("預算/合約金額", min_value=0)
             p_status = st.selectbox("狀態", ["進行中", "結案", "暫停"])
             p_progress = st.slider("進度", 0, 100, 0)
             if st.form_submit_button("上傳"):
@@ -131,9 +125,8 @@ with tab1:
 
     # 修改/列表專案
     with c2:
-        st.subheader("專案列表與管理")
+        st.subheader("專案列表與損益")
         if not df_projs.empty:
-            # 顯示列表
             proj_view = []
             for i, row in df_projs.iterrows():
                 p_cost = 0
@@ -142,42 +135,47 @@ with tab1:
                     p_trans = df_trans[df_trans['project_name'] == row['name']]
                     p_cost = p_trans[p_trans['type'] == '支出']['amount'].sum()
                     p_rev = p_trans[p_trans['type'] == '收入']['amount'].sum()
-                proj_view.append({"專案": row['name'], "狀態": row['status'], "進度": f"{row['progress']}%", "獲利": p_rev - p_cost})
+                
+                proj_view.append({
+                    "專案": row['name'],
+                    "預算/合約": f"${row['total_budget']:,.0f}", # <--- 加回這一行
+                    "狀態": row['status'],
+                    "進度": f"{row['progress']}%",
+                    "已投入成本": f"${p_cost:,.0f}",
+                    "目前獲利": p_rev - p_cost
+                })
             st.dataframe(pd.DataFrame(proj_view), use_container_width=True)
             
             st.divider()
             st.write("🛠 **修改或刪除專案**")
             
-            # 製作選單：顯示 (行號: 專案名)
-            # raw_projs[0] 是標題，所以資料從 index 1 開始，對應 Google Sheet 的 Row 2
+            # 選單
             proj_options = {}
             for idx, row in enumerate(raw_projs):
-                if idx == 0: continue # 跳過標題
+                if idx == 0: continue 
                 label = f"Row {idx+1}: {row[0]} (狀態: {row[3]})"
-                proj_options[label] = idx + 1 # 儲存真實的 Row Number
+                proj_options[label] = idx + 1 
 
             sel_proj_label = st.selectbox("選擇要操作的專案", list(proj_options.keys()))
             
             if sel_proj_label:
                 row_num = proj_options[sel_proj_label]
-                # 取得當前資料
-                curr_data = raw_projs[row_num - 1] # List index = Row - 1
+                curr_data = raw_projs[row_num - 1]
                 
                 with st.form("edit_proj"):
                     e_status = st.selectbox("更新狀態", ["進行中", "結案", "暫停"], index=["進行中", "結案", "暫停"].index(curr_data[3]) if curr_data[3] in ["進行中", "結案", "暫停"] else 0)
                     e_progress = st.slider("更新進度", 0, 100, int(float(curr_data[4])))
                     
                     c_edit, c_del = st.columns(2)
-                    if c_edit.form_submit_button("💾 更新狀態"):
-                        # 更新 Google Sheet (只更新狀態和進度欄位 D 和 E)
-                        ws_projs.update_cell(row_num, 4, e_status) # Col 4 = status
-                        ws_projs.update_cell(row_num, 5, e_progress) # Col 5 = progress
-                        st.success("更新成功！")
+                    if c_edit.form_submit_button("💾 更新"):
+                        ws_projs.update_cell(row_num, 4, e_status)
+                        ws_projs.update_cell(row_num, 5, e_progress)
+                        st.success("更新成功")
                         st.rerun()
                     
-                    if c_del.form_submit_button("🗑 刪除此專案", type="primary"):
+                    if c_del.form_submit_button("🗑 刪除", type="primary"):
                         ws_projs.delete_rows(row_num)
-                        st.warning("專案已刪除")
+                        st.warning("已刪除")
                         st.rerun()
 
 # --- Tab 2: 記帳 ---
@@ -199,20 +197,16 @@ with tab2:
             st.success("成功")
             st.rerun()
 
-# --- Tab 3: 報表修改與刪除 ---
+# --- Tab 3: 報表修改 ---
 with tab3:
     st.subheader("📋 帳務明細 (含修改功能)")
     
     if len(raw_trans) > 1:
-        # 顯示完整表格
         st.dataframe(df_trans, use_container_width=True)
-        
         st.divider()
         st.subheader("🛠 修改或刪除帳務")
         
-        # 製作選單：(Row: 日期 | 金額 | 備註)
         trans_options = {}
-        # 這裡我們倒序顯示 (最新的在最上面)
         for idx in range(len(raw_trans)-1, 0, -1):
             row = raw_trans[idx]
             label = f"Row {idx+1}: {row[0]} | ${row[3]} | {row[2]} | {row[4]}"
@@ -226,7 +220,6 @@ with tab3:
             
             with st.form("edit_trans"):
                 st.write(f"正在編輯第 {r_num} 列的資料")
-                # 日期處理
                 try:
                     default_date = datetime.strptime(curr_row[0], "%Y-%m-%d").date()
                 except:
@@ -239,16 +232,13 @@ with tab3:
                 new_note = st.text_input("備註", value=curr_row[4])
                 
                 b1, b2 = st.columns(2)
-                if b1.form_submit_button("💾 確認修改"):
-                    # 組合要更新的資料 (Col 1 to 5)
-                    # Google Sheet update 使用 range, e.g. "A2:E2"
+                if b1.form_submit_button("💾 確認"):
                     update_range = f"A{r_num}:E{r_num}" 
-                    # 注意：我們不改 project_name (Col 6) 和 timestamp (Col 7) 以免亂掉，或者您可以自行加入
                     ws_trans.update(range_name=update_range, values=[[str(new_date), curr_row[1], new_cat, new_amt, new_note]])
-                    st.success("修改成功！")
+                    st.success("成功")
                     st.rerun()
                     
-                if b2.form_submit_button("🗑 刪除此紀錄", type="primary"):
+                if b2.form_submit_button("🗑 刪除", type="primary"):
                     ws_trans.delete_rows(r_num)
                     st.warning("已刪除")
                     st.rerun()
