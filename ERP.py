@@ -41,15 +41,15 @@ def init_sheets(sheet):
         return ws_trans, ws_projs
     except: return None, None
 
-st.set_page_config(page_title="雲端公司中控台", layout="wide", page_icon="🛠")
-st.title("☁️ 公司營運中控台 (V13 智能欄位修復版)")
+st.set_page_config(page_title="雲端公司中控台", layout="wide", page_icon="🔧")
+st.title("☁️ 公司營運中控台 (V14 數據分離修復版)")
 
 sh = connect_google_sheet()
 if not sh: st.stop()
 ws_trans, ws_projs = init_sheets(sh)
 
 # ==========================================
-# 資料讀取與前處理
+# 資料讀取 (絕對純淨，不做自動修改)
 # ==========================================
 raw_trans = ws_trans.get_all_values()
 if len(raw_trans) > 1:
@@ -60,9 +60,7 @@ else:
 raw_projs = ws_projs.get_all_values()
 if len(raw_projs) > 1:
     header = raw_projs[0]
-    # 如果缺欄位自動補齊
     if "end_date" not in header: header.append("end_date")
-    
     clean_data = []
     for row in raw_projs[1:]:
         while len(row) < len(header): row.append("")
@@ -71,7 +69,7 @@ if len(raw_projs) > 1:
 else:
     df_projs = pd.DataFrame(columns=["name", "total_budget", "start_date", "status", "progress", "created_at", "end_date"])
 
-# 資料型態轉換
+# --- 資料型態轉換 (僅做格式化，不改值) ---
 if not df_trans.empty:
     df_trans['amount'] = pd.to_numeric(df_trans['amount'], errors='coerce').fillna(0)
     df_trans['date'] = pd.to_datetime(df_trans['date'], errors='coerce')
@@ -79,16 +77,8 @@ if not df_trans.empty:
 if not df_projs.empty:
     df_projs['total_budget'] = pd.to_numeric(df_projs['total_budget'], errors='coerce').fillna(0)
     df_projs['progress'] = pd.to_numeric(df_projs['progress'], errors='coerce').fillna(0)
+    # 這裡只轉型態，如果 user 沒填日期，就讓它是 NaT (空值)，不要雞婆幫他補
     df_projs['start_date'] = pd.to_datetime(df_projs['start_date'], errors='coerce')
-    
-    # 填充日期邏輯
-    def fill_end_date(row):
-        # 只有當真的沒資料時才自動填，如果有資料就不要動
-        if pd.isnull(row['end_date']) or str(row['end_date']).strip() == "":
-            return row['start_date'] + timedelta(days=30) if pd.notnull(row['start_date']) else date.today()
-        return row['end_date']
-    
-    df_projs['end_date'] = df_projs.apply(fill_end_date, axis=1)
     df_projs['end_date'] = pd.to_datetime(df_projs['end_date'], errors='coerce')
 
 # ==========================================
@@ -113,14 +103,34 @@ col4.metric("🏦 總資金水位", f"${total_balance:,.0f}")
 st.divider()
 
 # ==========================================
-# 全景圖 (V12 含格網)
+# 全景圖 (畫圖專用邏輯)
 # ==========================================
 if not df_trans.empty or not df_projs.empty:
+    
+    # --- 1. 準備畫圖用的資料 (df_chart_projs) ---
+    # 這裡我們複製一份資料專門給圖表用，怎麼改都不會影響原資料
+    df_chart_projs = df_projs.copy()
+    
+    # 對「畫圖用」的資料進行補洞，避免圖表畫不出來
+    def fill_chart_dates(row):
+        s = row['start_date']
+        e = row['end_date']
+        if pd.isnull(s): s = datetime.today() # 沒開始日補今天
+        if pd.isnull(e): e = s + timedelta(days=30) # 沒結束日補+30天
+        return s, e
+
+    # 應用補洞邏輯
+    if not df_chart_projs.empty:
+        df_chart_projs[['start_date', 'end_date']] = df_chart_projs.apply(
+            lambda x: pd.Series(fill_chart_dates(x)), axis=1
+        )
+
+    # --- 2. 計算全域時間範圍 ---
     all_dates = []
     if not df_trans.empty: all_dates.extend(df_trans['date'].dropna().tolist())
-    if not df_projs.empty: 
-        all_dates.extend(df_projs['start_date'].dropna().tolist())
-        all_dates.extend(df_projs['end_date'].dropna().tolist())
+    if not df_chart_projs.empty: 
+        all_dates.extend(df_chart_projs['start_date'].dropna().tolist())
+        all_dates.extend(df_chart_projs['end_date'].dropna().tolist())
     
     if all_dates:
         min_date = min(all_dates).replace(day=1) 
@@ -129,12 +139,14 @@ if not df_trans.empty or not df_projs.empty:
     else:
         full_date_range = pd.date_range(start=date.today(), periods=3, freq='MS')
 
+    # --- 3. 開始畫圖 ---
     fig = make_subplots(
         rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.1, row_heights=[0.5, 0.5],
         specs=[[{"secondary_y": True}], [{"secondary_y": False}]],
         subplot_titles=("💰 財務收支與水位", "🗓 專案時程概況")
     )
 
+    # 上半部：財務
     if not df_trans.empty:
         df_chart = df_trans.copy()
         df_chart['PlotDate'] = df_chart['date'].apply(lambda x: x.replace(day=1))
@@ -148,9 +160,10 @@ if not df_trans.empty or not df_projs.empty:
         fig.add_trace(go.Bar(x=monthly_stats.index, y=monthly_stats['支出'], name='支出', marker_color='#EF553B', opacity=0.7), row=1, col=1, secondary_y=False)
         fig.add_trace(go.Scatter(x=monthly_stats.index, y=monthly_stats['Cumulative'], name='資金水位', mode='lines+markers', line=dict(color='#636EFA', width=3)), row=1, col=1, secondary_y=True)
 
-    if not df_projs.empty:
+    # 下半部：專案 (使用 df_chart_projs)
+    if not df_chart_projs.empty:
         color_map = {"進行中": "#00CC96", "暫停": "#FFA15A", "結案": "#AB63FA"}
-        df_p_sorted = df_projs.sort_values("start_date")
+        df_p_sorted = df_chart_projs.sort_values("start_date")
         for i, row in df_p_sorted.iterrows():
             status_color = color_map.get(row['status'], "#888888")
             fig.add_trace(go.Scatter(
@@ -165,13 +178,14 @@ if not df_trans.empty or not df_projs.empty:
     )
     fig.update_xaxes(tickformat="%Y-%m", dtick="M1", showgrid=True, gridwidth=1, gridcolor='rgba(211, 211, 211, 0.6)', griddash='dash', ticklabelmode="period")
     st.plotly_chart(fig, use_container_width=True)
+
 else:
     st.info("💡 請輸入記帳與專案資料")
 
 st.divider()
 
 # ==========================================
-# 3. 功能分頁 (Excel 編輯模式 - 智能欄位對應版)
+# 3. 功能分頁 (Excel 編輯模式)
 # ==========================================
 tab1, tab2, tab3 = st.tabs(["🏗 專案管理", "✍️ 雲端記帳", "📋 帳務總表"])
 
@@ -192,6 +206,7 @@ with tab1:
                 st.success("新增成功"); st.rerun()
 
     st.subheader("專案列表 (Excel 編輯模式)")
+    # 這裡使用的 df_projs 是最原始的資料，沒有經過任何「補洞」，所以會忠實呈現
     if not df_projs.empty:
         edited_df = st.data_editor(
             df_projs,
@@ -211,16 +226,12 @@ with tab1:
                 deleted_indices = changes.get("deleted_rows", [])
                 edited_cells = changes.get("edited_rows", {})
 
-                # 1. 處理刪除
                 if deleted_indices:
                     rows_to_delete = sorted([i + 2 for i in deleted_indices], reverse=True)
                     for r in rows_to_delete: ws_projs.delete_rows(r)
                 
-                # 2. 處理修改 (智能欄位對應)
                 if edited_cells:
-                    # 動態建立欄位地圖：{欄位名稱: 它是第幾欄}
-                    # 這樣不管 Google Sheet 順序怎麼變，都能寫對位置
-                    header_row = ws_projs.row_values(1) # 讀取第一列
+                    header_row = ws_projs.row_values(1)
                     col_map = {name: i+1 for i, name in enumerate(header_row)}
                     
                     for idx, change_dict in edited_cells.items():
@@ -229,10 +240,8 @@ with tab1:
                         
                         for col_name, new_val in change_dict.items():
                             if col_name in col_map:
-                                # 【關鍵修正】日期格式強制轉字串
                                 if isinstance(new_val, (date, datetime, pd.Timestamp)):
-                                    new_val = str(new_val).split(" ")[0] # 只取 YYYY-MM-DD
-                                
+                                    new_val = str(new_val).split(" ")[0]
                                 ws_projs.update_cell(sheet_row, col_map[col_name], new_val)
                                 
                 st.success("更新成功"); st.rerun()
@@ -278,10 +287,8 @@ with tab3:
                     rows_to_delete = sorted([i + 2 for i in deleted_indices], reverse=True)
                     for r in rows_to_delete: ws_trans.delete_rows(r)
                 if edited_cells:
-                    # 記帳頁面也採用智能對應
                     header_row_t = ws_trans.row_values(1)
                     col_map_t = {name: i+1 for i, name in enumerate(header_row_t)}
-                    
                     for idx, change_dict in edited_cells.items():
                         sheet_row = idx + 2
                         if idx in deleted_indices: continue
