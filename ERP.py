@@ -41,15 +41,15 @@ def init_sheets(sheet):
         return ws_trans, ws_projs
     except: return None, None
 
-st.set_page_config(page_title="雲端公司中控台", layout="wide", page_icon="🔧")
-st.title("☁️ 公司營運中控台 (V14 數據分離修復版)")
+st.set_page_config(page_title="雲端公司中控台", layout="wide", page_icon="🗓")
+st.title("☁️ 公司營運中控台 (V15 介面優化版)")
 
 sh = connect_google_sheet()
 if not sh: st.stop()
 ws_trans, ws_projs = init_sheets(sh)
 
 # ==========================================
-# 資料讀取 (絕對純淨，不做自動修改)
+# 資料讀取 (讀取原始資料，不做過度修改)
 # ==========================================
 raw_trans = ws_trans.get_all_values()
 if len(raw_trans) > 1:
@@ -69,7 +69,7 @@ if len(raw_projs) > 1:
 else:
     df_projs = pd.DataFrame(columns=["name", "total_budget", "start_date", "status", "progress", "created_at", "end_date"])
 
-# --- 資料型態轉換 (僅做格式化，不改值) ---
+# --- 資料型態轉換 ---
 if not df_trans.empty:
     df_trans['amount'] = pd.to_numeric(df_trans['amount'], errors='coerce').fillna(0)
     df_trans['date'] = pd.to_datetime(df_trans['date'], errors='coerce')
@@ -77,7 +77,7 @@ if not df_trans.empty:
 if not df_projs.empty:
     df_projs['total_budget'] = pd.to_numeric(df_projs['total_budget'], errors='coerce').fillna(0)
     df_projs['progress'] = pd.to_numeric(df_projs['progress'], errors='coerce').fillna(0)
-    # 這裡只轉型態，如果 user 沒填日期，就讓它是 NaT (空值)，不要雞婆幫他補
+    # 這裡只轉型態，保留 NaT (空值)，不要自動填入，避免干擾編輯
     df_projs['start_date'] = pd.to_datetime(df_projs['start_date'], errors='coerce')
     df_projs['end_date'] = pd.to_datetime(df_projs['end_date'], errors='coerce')
 
@@ -107,25 +107,22 @@ st.divider()
 # ==========================================
 if not df_trans.empty or not df_projs.empty:
     
-    # --- 1. 準備畫圖用的資料 (df_chart_projs) ---
-    # 這裡我們複製一份資料專門給圖表用，怎麼改都不會影響原資料
+    # 1. 複製資料給圖表用 (補洞邏輯只作用在圖表，不改原始資料)
     df_chart_projs = df_projs.copy()
     
-    # 對「畫圖用」的資料進行補洞，避免圖表畫不出來
     def fill_chart_dates(row):
         s = row['start_date']
         e = row['end_date']
-        if pd.isnull(s): s = datetime.today() # 沒開始日補今天
-        if pd.isnull(e): e = s + timedelta(days=30) # 沒結束日補+30天
+        if pd.isnull(s): s = datetime.today() 
+        if pd.isnull(e): e = s + timedelta(days=30)
         return s, e
 
-    # 應用補洞邏輯
     if not df_chart_projs.empty:
         df_chart_projs[['start_date', 'end_date']] = df_chart_projs.apply(
             lambda x: pd.Series(fill_chart_dates(x)), axis=1
         )
 
-    # --- 2. 計算全域時間範圍 ---
+    # 2. 計算時間軸
     all_dates = []
     if not df_trans.empty: all_dates.extend(df_trans['date'].dropna().tolist())
     if not df_chart_projs.empty: 
@@ -139,14 +136,13 @@ if not df_trans.empty or not df_projs.empty:
     else:
         full_date_range = pd.date_range(start=date.today(), periods=3, freq='MS')
 
-    # --- 3. 開始畫圖 ---
+    # 3. 畫圖
     fig = make_subplots(
         rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.1, row_heights=[0.5, 0.5],
         specs=[[{"secondary_y": True}], [{"secondary_y": False}]],
         subplot_titles=("💰 財務收支與水位", "🗓 專案時程概況")
     )
 
-    # 上半部：財務
     if not df_trans.empty:
         df_chart = df_trans.copy()
         df_chart['PlotDate'] = df_chart['date'].apply(lambda x: x.replace(day=1))
@@ -160,7 +156,6 @@ if not df_trans.empty or not df_projs.empty:
         fig.add_trace(go.Bar(x=monthly_stats.index, y=monthly_stats['支出'], name='支出', marker_color='#EF553B', opacity=0.7), row=1, col=1, secondary_y=False)
         fig.add_trace(go.Scatter(x=monthly_stats.index, y=monthly_stats['Cumulative'], name='資金水位', mode='lines+markers', line=dict(color='#636EFA', width=3)), row=1, col=1, secondary_y=True)
 
-    # 下半部：專案 (使用 df_chart_projs)
     if not df_chart_projs.empty:
         color_map = {"進行中": "#00CC96", "暫停": "#FFA15A", "結案": "#AB63FA"}
         df_p_sorted = df_chart_projs.sort_values("start_date")
@@ -206,7 +201,6 @@ with tab1:
                 st.success("新增成功"); st.rerun()
 
     st.subheader("專案列表 (Excel 編輯模式)")
-    # 這裡使用的 df_projs 是最原始的資料，沒有經過任何「補洞」，所以會忠實呈現
     if not df_projs.empty:
         edited_df = st.data_editor(
             df_projs,
@@ -215,8 +209,10 @@ with tab1:
                 "name": "專案名稱", "total_budget": st.column_config.NumberColumn("預算", format="$%d"),
                 "status": st.column_config.SelectboxColumn("狀態", options=["進行中", "結案", "暫停"]),
                 "progress": st.column_config.ProgressColumn("進度", format="%d%%", min_value=0, max_value=100),
-                "start_date": st.column_config.DateColumn("開始日期"), "end_date": st.column_config.DateColumn("結束日期"),
-                "created_at": st.column_config.Column("建立時間", disabled=True)
+                "start_date": st.column_config.DateColumn("開始日期"), 
+                "end_date": st.column_config.DateColumn("結束日期"),
+                # 【關鍵修改】直接隱藏 created_at 欄位，解決「倒數第二欄不知名欄位」的問題
+                "created_at": None 
             }, hide_index=True
         )
 
@@ -231,6 +227,7 @@ with tab1:
                     for r in rows_to_delete: ws_projs.delete_rows(r)
                 
                 if edited_cells:
+                    # 智能欄位對應
                     header_row = ws_projs.row_values(1)
                     col_map = {name: i+1 for i, name in enumerate(header_row)}
                     
@@ -240,8 +237,10 @@ with tab1:
                         
                         for col_name, new_val in change_dict.items():
                             if col_name in col_map:
+                                # 【關鍵修正】強制把日期轉成字串，避免寫入失敗或跳回原值
                                 if isinstance(new_val, (date, datetime, pd.Timestamp)):
-                                    new_val = str(new_val).split(" ")[0]
+                                    new_val = new_val.strftime('%Y-%m-%d')
+                                
                                 ws_projs.update_cell(sheet_row, col_map[col_name], new_val)
                                 
                 st.success("更新成功"); st.rerun()
@@ -269,13 +268,14 @@ with tab2:
 with tab3:
     st.subheader("📋 帳務總表 (Excel 編輯模式)")
     if not df_trans.empty:
+        # 同樣隱藏 created_at，保持介面整潔
         edited_trans = st.data_editor(
             df_trans, key="trans_editor", num_rows="dynamic", use_container_width=True,
             column_config={
                 "date": st.column_config.DateColumn("日期"), "type": st.column_config.SelectboxColumn("類型", options=["支出", "收入"]),
                 "category": st.column_config.SelectboxColumn("科目", options=["專案款", "薪資", "房租", "外包", "軟硬體", "雜支"]),
                 "amount": st.column_config.NumberColumn("金額", format="$%d"), "project_name": "歸屬專案", "note": "備註",
-                "created_at": st.column_config.Column("記錄時間", disabled=True)
+                "created_at": None # 隱藏
             }, hide_index=True
         )
         if st.button("💾 儲存帳務變更"):
@@ -295,7 +295,7 @@ with tab3:
                         for col_name, new_val in change_dict.items():
                             if col_name in col_map_t:
                                 if isinstance(new_val, (date, datetime, pd.Timestamp)):
-                                    new_val = str(new_val).split(" ")[0]
+                                    new_val = new_val.strftime('%Y-%m-%d')
                                 ws_trans.update_cell(sheet_row, col_map_t[col_name], new_val)
                 st.success("更新成功"); st.rerun()
             except Exception as e: st.error(f"儲存失敗: {e}")
