@@ -5,7 +5,7 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 import json
 import plotly.graph_objects as go
-from plotly.subplots import make_subplots # 引入子圖表模組
+from plotly.subplots import make_subplots
 
 # ==========================================
 # 1. Google Sheets 連線設定
@@ -41,8 +41,8 @@ def init_sheets(sheet):
         return ws_trans, ws_projs
     except: return None, None
 
-st.set_page_config(page_title="雲端公司中控台", layout="wide", page_icon="🧿")
-st.title("☁️ 公司營運中控台 (V10 全景戰情版)")
+st.set_page_config(page_title="雲端公司中控台", layout="wide", page_icon="🗓")
+st.title("☁️ 公司營運中控台 (V11 完整時序版)")
 
 sh = connect_google_sheet()
 if not sh: st.stop()
@@ -108,84 +108,98 @@ col4.metric("🏦 總資金水位", f"${total_balance:,.0f}")
 st.divider()
 
 # ==========================================
-# 🔥 核心功能：V10 雙層連動全景圖
+# 🔥 核心功能：V11 連續時軸全景圖
 # ==========================================
 if not df_trans.empty or not df_projs.empty:
     
-    # 1. 建立子圖表框架 (2 列 1 行)
-    # shared_xaxes=True 是關鍵，讓上下兩張圖的時間軸同步
+    # --- 1. 計算全域時間範圍 (為了讓 X 軸完整) ---
+    all_dates = []
+    if not df_trans.empty: all_dates.extend(df_trans['date'].dropna().tolist())
+    if not df_projs.empty: 
+        all_dates.extend(df_projs['start_date'].dropna().tolist())
+        all_dates.extend(df_projs['end_date'].dropna().tolist())
+    
+    if all_dates:
+        min_date = min(all_dates).replace(day=1) # 當月1號
+        max_date = max(all_dates) + timedelta(days=30) # 多加一個月緩衝
+        # 建立完整的月份索引 (從最早到最晚，每個月都有)
+        full_date_range = pd.date_range(start=min_date, end=max_date, freq='MS')
+    else:
+        full_date_range = pd.date_range(start=date.today(), periods=3, freq='MS') # 預設
+
+    # 建立子圖表
     fig = make_subplots(
         rows=2, cols=1, 
         shared_xaxes=True, 
         vertical_spacing=0.1,
-        row_heights=[0.5, 0.5], # 上下高度比例
+        row_heights=[0.5, 0.5],
         specs=[[{"secondary_y": True}], [{"secondary_y": False}]],
         subplot_titles=("💰 財務收支與水位", "🗓 專案時程概況")
     )
 
-    # --- 上半部：財務圖 (Row 1) ---
+    # --- 上半部：財務圖 ---
     if not df_trans.empty:
         df_chart = df_trans.copy()
-        df_chart['Month'] = df_chart['date'].dt.strftime('%Y-%m')
-        # 把日期設為每月1號以便繪圖
+        # 為了跟 full_date_range 對齊，將所有日期正規化為當月 1 號
         df_chart['PlotDate'] = df_chart['date'].apply(lambda x: x.replace(day=1))
         
+        # 分組計算
         monthly_stats = df_chart.groupby(['PlotDate', 'type'])['amount'].sum().unstack(fill_value=0)
+        
+        # 【關鍵步驟】使用 reindex 強制補齊所有月份 (沒有資料的月份會填 0)
+        monthly_stats = monthly_stats.reindex(full_date_range, fill_value=0)
+        
         if '收入' not in monthly_stats.columns: monthly_stats['收入'] = 0
         if '支出' not in monthly_stats.columns: monthly_stats['支出'] = 0
         monthly_stats['Cumulative'] = (monthly_stats['收入'] - monthly_stats['支出']).cumsum()
 
-        # 柱狀圖：收入
+        # 畫圖
         fig.add_trace(go.Bar(
             x=monthly_stats.index, y=monthly_stats['收入'],
             name='收入', marker_color='#00CC96', opacity=0.7
         ), row=1, col=1, secondary_y=False)
 
-        # 柱狀圖：支出
         fig.add_trace(go.Bar(
             x=monthly_stats.index, y=monthly_stats['支出'],
             name='支出', marker_color='#EF553B', opacity=0.7
         ), row=1, col=1, secondary_y=False)
 
-        # 折線圖：資金水位 (右軸)
         fig.add_trace(go.Scatter(
             x=monthly_stats.index, y=monthly_stats['Cumulative'],
             name='資金水位', mode='lines+markers',
             line=dict(color='#636EFA', width=3)
         ), row=1, col=1, secondary_y=True)
 
-    # --- 下半部：專案甘特圖 (Row 2) ---
-    # Plotly Subplots 不支援直接放 px.timeline，所以我們用 go.Scatter 手畫線條來模擬甘特圖
+    # --- 下半部：專案甘特圖 ---
     if not df_projs.empty:
-        # 顏色對應
         color_map = {"進行中": "#00CC96", "暫停": "#FFA15A", "結案": "#AB63FA"}
-        
-        # 依照開始時間排序
         df_p_sorted = df_projs.sort_values("start_date")
         
         for i, row in df_p_sorted.iterrows():
             status_color = color_map.get(row['status'], "#888888")
-            
-            # 畫一條粗線代表專案區間
             fig.add_trace(go.Scatter(
                 x=[row['start_date'], row['end_date']],
                 y=[row['name'], row['name']],
                 mode="lines",
-                line=dict(color=status_color, width=20), # width=20 讓線看起來像 Bar
-                name=row['name'],
-                showlegend=False, # 不要在圖例顯示每個專案名稱，太亂
+                line=dict(color=status_color, width=20),
+                name=row['name'], showlegend=False,
                 hovertemplate=f"<b>{row['name']}</b><br>狀態: {row['status']}<br>進度: {row['progress']}%<br>%{{x}}<extra></extra>"
             ), row=2, col=1)
 
     # --- 版面美化 ---
     fig.update_layout(
-        height=700, # 把圖拉高一點才看得清楚
+        height=700,
         barmode='group',
         legend=dict(orientation="h", y=1.1, x=0),
-        xaxis2=dict(title="時間軸", tickformat="%Y-%m"), # 下圖的 X 軸格式
         yaxis=dict(title="單月收支", showgrid=True),
         yaxis2=dict(title="累計水位", showgrid=False, overlaying='y', side='right'),
-        yaxis3=dict(title="專案列表", automargin=True) # 下圖的 Y 軸
+        yaxis3=dict(title="專案列表", automargin=True),
+        # 【關鍵設定】強制 X 軸顯示每一個月
+        xaxis2=dict(
+            tickformat="%Y-%m", # 顯示格式 2024-01
+            dtick="M1",         # 強制每一個月跳一格 (M1 = 1 Month)
+            ticklabelmode="period" # 標籤置中
+        )
     )
 
     st.plotly_chart(fig, use_container_width=True)
