@@ -6,6 +6,7 @@ from oauth2client.service_account import ServiceAccountCredentials
 import json
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+import time # 引入時間模組，處理寫入延遲
 
 # ==========================================
 # 1. Google Sheets 連線設定
@@ -41,15 +42,15 @@ def init_sheets(sheet):
         return ws_trans, ws_projs
     except: return None, None
 
-st.set_page_config(page_title="雲端公司中控台", layout="wide", page_icon="🗓")
-st.title("☁️ 公司營運中控台 (V15 介面優化版)")
+st.set_page_config(page_title="雲端公司中控台", layout="wide", page_icon="⏱")
+st.title("☁️ 公司營運中控台 (V16 精準圖表版)")
 
 sh = connect_google_sheet()
 if not sh: st.stop()
 ws_trans, ws_projs = init_sheets(sh)
 
 # ==========================================
-# 資料讀取 (讀取原始資料，不做過度修改)
+# 資料讀取
 # ==========================================
 raw_trans = ws_trans.get_all_values()
 if len(raw_trans) > 1:
@@ -77,7 +78,7 @@ if not df_trans.empty:
 if not df_projs.empty:
     df_projs['total_budget'] = pd.to_numeric(df_projs['total_budget'], errors='coerce').fillna(0)
     df_projs['progress'] = pd.to_numeric(df_projs['progress'], errors='coerce').fillna(0)
-    # 這裡只轉型態，保留 NaT (空值)，不要自動填入，避免干擾編輯
+    # 保留原始數據，不做過度填充，確保編輯時看到的是真的
     df_projs['start_date'] = pd.to_datetime(df_projs['start_date'], errors='coerce')
     df_projs['end_date'] = pd.to_datetime(df_projs['end_date'], errors='coerce')
 
@@ -107,19 +108,27 @@ st.divider()
 # ==========================================
 if not df_trans.empty or not df_projs.empty:
     
-    # 1. 複製資料給圖表用 (補洞邏輯只作用在圖表，不改原始資料)
+    # 1. 複製資料給圖表用 (這裡的修改不會影響表格編輯)
     df_chart_projs = df_projs.copy()
     
-    def fill_chart_dates(row):
+    def prepare_chart_dates(row):
         s = row['start_date']
         e = row['end_date']
-        if pd.isnull(s): s = datetime.today() 
+        
+        # 補洞：如果沒開始時間，補今天
+        if pd.isnull(s): s = datetime.today()
+        # 補洞：如果沒結束時間，補開始+30天
         if pd.isnull(e): e = s + timedelta(days=30)
+        
+        # 【關鍵修正】如果開始跟結束是同一天，強制讓結束日+1天，不然線條會消失看不見
+        if s == e:
+            e = s + timedelta(days=1)
+            
         return s, e
 
     if not df_chart_projs.empty:
         df_chart_projs[['start_date', 'end_date']] = df_chart_projs.apply(
-            lambda x: pd.Series(fill_chart_dates(x)), axis=1
+            lambda x: pd.Series(prepare_chart_dates(x)), axis=1
         )
 
     # 2. 計算時間軸
@@ -159,12 +168,19 @@ if not df_trans.empty or not df_projs.empty:
     if not df_chart_projs.empty:
         color_map = {"進行中": "#00CC96", "暫停": "#FFA15A", "結案": "#AB63FA"}
         df_p_sorted = df_chart_projs.sort_values("start_date")
+        
         for i, row in df_p_sorted.iterrows():
             status_color = color_map.get(row['status'], "#888888")
+            
+            # 格式化日期字串，顯示在 Tooltip
+            s_str = row['start_date'].strftime('%Y-%m-%d')
+            e_str = row['end_date'].strftime('%Y-%m-%d')
+            
             fig.add_trace(go.Scatter(
                 x=[row['start_date'], row['end_date']], y=[row['name'], row['name']],
                 mode="lines", line=dict(color=status_color, width=20), name=row['name'], showlegend=False,
-                hovertemplate=f"<b>{row['name']}</b><br>狀態: {row['status']}<br>進度: {row['progress']}%<br>%{{x}}<extra></extra>"
+                # 【優化】這裡的 hovertemplate 會明確告訴您圖表畫的是哪一天
+                hovertemplate=f"<b>{row['name']}</b><br>狀態: {row['status']}<br>開始: {s_str}<br>結束: {e_str}<br>進度: {row['progress']}%<extra></extra>"
             ), row=2, col=1)
 
     fig.update_layout(height=700, barmode='group', legend=dict(orientation="h", y=1.1, x=0),
@@ -180,7 +196,7 @@ else:
 st.divider()
 
 # ==========================================
-# 3. 功能分頁 (Excel 編輯模式)
+# 3. 功能分頁
 # ==========================================
 tab1, tab2, tab3 = st.tabs(["🏗 專案管理", "✍️ 雲端記帳", "📋 帳務總表"])
 
@@ -211,7 +227,6 @@ with tab1:
                 "progress": st.column_config.ProgressColumn("進度", format="%d%%", min_value=0, max_value=100),
                 "start_date": st.column_config.DateColumn("開始日期"), 
                 "end_date": st.column_config.DateColumn("結束日期"),
-                # 【關鍵修改】直接隱藏 created_at 欄位，解決「倒數第二欄不知名欄位」的問題
                 "created_at": None 
             }, hide_index=True
         )
@@ -227,7 +242,6 @@ with tab1:
                     for r in rows_to_delete: ws_projs.delete_rows(r)
                 
                 if edited_cells:
-                    # 智能欄位對應
                     header_row = ws_projs.row_values(1)
                     col_map = {name: i+1 for i, name in enumerate(header_row)}
                     
@@ -237,12 +251,14 @@ with tab1:
                         
                         for col_name, new_val in change_dict.items():
                             if col_name in col_map:
-                                # 【關鍵修正】強制把日期轉成字串，避免寫入失敗或跳回原值
                                 if isinstance(new_val, (date, datetime, pd.Timestamp)):
                                     new_val = new_val.strftime('%Y-%m-%d')
-                                
                                 ws_projs.update_cell(sheet_row, col_map[col_name], new_val)
-                                
+                
+                # 【關鍵修正】強制等待 1 秒，讓 Google 雲端有時間存檔
+                with st.spinner("正在同步至雲端，請稍候..."):
+                    time.sleep(1)
+                    
                 st.success("更新成功"); st.rerun()
             except Exception as e: st.error(f"儲存失敗: {e}")
 
@@ -268,14 +284,13 @@ with tab2:
 with tab3:
     st.subheader("📋 帳務總表 (Excel 編輯模式)")
     if not df_trans.empty:
-        # 同樣隱藏 created_at，保持介面整潔
         edited_trans = st.data_editor(
             df_trans, key="trans_editor", num_rows="dynamic", use_container_width=True,
             column_config={
                 "date": st.column_config.DateColumn("日期"), "type": st.column_config.SelectboxColumn("類型", options=["支出", "收入"]),
                 "category": st.column_config.SelectboxColumn("科目", options=["專案款", "薪資", "房租", "外包", "軟硬體", "雜支"]),
                 "amount": st.column_config.NumberColumn("金額", format="$%d"), "project_name": "歸屬專案", "note": "備註",
-                "created_at": None # 隱藏
+                "created_at": None
             }, hide_index=True
         )
         if st.button("💾 儲存帳務變更"):
@@ -297,5 +312,8 @@ with tab3:
                                 if isinstance(new_val, (date, datetime, pd.Timestamp)):
                                     new_val = new_val.strftime('%Y-%m-%d')
                                 ws_trans.update_cell(sheet_row, col_map_t[col_name], new_val)
+                # 同樣加入延遲，確保同步
+                with st.spinner("正在同步至雲端..."):
+                    time.sleep(1)
                 st.success("更新成功"); st.rerun()
             except Exception as e: st.error(f"儲存失敗: {e}")
