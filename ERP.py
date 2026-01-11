@@ -41,8 +41,8 @@ def init_sheets(sheet):
         return ws_trans, ws_projs
     except: return None, None
 
-st.set_page_config(page_title="雲端公司中控台", layout="wide", page_icon="🗓")
-st.title("☁️ 公司營運中控台 (V11 完整時序版)")
+st.set_page_config(page_title="雲端公司中控台", layout="wide", page_icon="📏")
+st.title("☁️ 公司營運中控台 (V12 虛線格網版)")
 
 sh = connect_google_sheet()
 if not sh: st.stop()
@@ -108,11 +108,11 @@ col4.metric("🏦 總資金水位", f"${total_balance:,.0f}")
 st.divider()
 
 # ==========================================
-# 🔥 核心功能：V11 連續時軸全景圖
+# 🔥 核心功能：全景圖 (含虛線格網)
 # ==========================================
 if not df_trans.empty or not df_projs.empty:
     
-    # --- 1. 計算全域時間範圍 (為了讓 X 軸完整) ---
+    # 1. 計算全域時間範圍
     all_dates = []
     if not df_trans.empty: all_dates.extend(df_trans['date'].dropna().tolist())
     if not df_projs.empty: 
@@ -120,12 +120,11 @@ if not df_trans.empty or not df_projs.empty:
         all_dates.extend(df_projs['end_date'].dropna().tolist())
     
     if all_dates:
-        min_date = min(all_dates).replace(day=1) # 當月1號
-        max_date = max(all_dates) + timedelta(days=30) # 多加一個月緩衝
-        # 建立完整的月份索引 (從最早到最晚，每個月都有)
+        min_date = min(all_dates).replace(day=1) 
+        max_date = max(all_dates) + timedelta(days=30)
         full_date_range = pd.date_range(start=min_date, end=max_date, freq='MS')
     else:
-        full_date_range = pd.date_range(start=date.today(), periods=3, freq='MS') # 預設
+        full_date_range = pd.date_range(start=date.today(), periods=3, freq='MS')
 
     # 建立子圖表
     fig = make_subplots(
@@ -140,20 +139,15 @@ if not df_trans.empty or not df_projs.empty:
     # --- 上半部：財務圖 ---
     if not df_trans.empty:
         df_chart = df_trans.copy()
-        # 為了跟 full_date_range 對齊，將所有日期正規化為當月 1 號
         df_chart['PlotDate'] = df_chart['date'].apply(lambda x: x.replace(day=1))
         
-        # 分組計算
         monthly_stats = df_chart.groupby(['PlotDate', 'type'])['amount'].sum().unstack(fill_value=0)
-        
-        # 【關鍵步驟】使用 reindex 強制補齊所有月份 (沒有資料的月份會填 0)
         monthly_stats = monthly_stats.reindex(full_date_range, fill_value=0)
         
         if '收入' not in monthly_stats.columns: monthly_stats['收入'] = 0
         if '支出' not in monthly_stats.columns: monthly_stats['支出'] = 0
         monthly_stats['Cumulative'] = (monthly_stats['收入'] - monthly_stats['支出']).cumsum()
 
-        # 畫圖
         fig.add_trace(go.Bar(
             x=monthly_stats.index, y=monthly_stats['收入'],
             name='收入', marker_color='#00CC96', opacity=0.7
@@ -186,20 +180,25 @@ if not df_trans.empty or not df_projs.empty:
                 hovertemplate=f"<b>{row['name']}</b><br>狀態: {row['status']}<br>進度: {row['progress']}%<br>%{{x}}<extra></extra>"
             ), row=2, col=1)
 
-    # --- 版面美化 ---
+    # --- 版面美化 (新增格網設定) ---
     fig.update_layout(
         height=700,
         barmode='group',
         legend=dict(orientation="h", y=1.1, x=0),
         yaxis=dict(title="單月收支", showgrid=True),
         yaxis2=dict(title="累計水位", showgrid=False, overlaying='y', side='right'),
-        yaxis3=dict(title="專案列表", automargin=True),
-        # 【關鍵設定】強制 X 軸顯示每一個月
-        xaxis2=dict(
-            tickformat="%Y-%m", # 顯示格式 2024-01
-            dtick="M1",         # 強制每一個月跳一格 (M1 = 1 Month)
-            ticklabelmode="period" # 標籤置中
-        )
+        yaxis3=dict(title="專案列表", automargin=True)
+    )
+
+    # 【核心修改】統一設定 X 軸樣式，加入虛線格網
+    fig.update_xaxes(
+        tickformat="%Y-%m",    # 顯示格式
+        dtick="M1",            # 每個月一個刻度
+        showgrid=True,         # 顯示格線
+        gridwidth=1,           # 線寬
+        gridcolor='rgba(211, 211, 211, 0.6)', # 淺灰色
+        griddash='dash',       # 設定為虛線 (dash)
+        ticklabelmode="period" # 標籤置中對齊區間
     )
 
     st.plotly_chart(fig, use_container_width=True)
