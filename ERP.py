@@ -6,7 +6,7 @@ from oauth2client.service_account import ServiceAccountCredentials
 import json
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-import time # 引入時間模組，處理寫入延遲
+import time
 
 # ==========================================
 # 1. Google Sheets 連線設定
@@ -42,8 +42,8 @@ def init_sheets(sheet):
         return ws_trans, ws_projs
     except: return None, None
 
-st.set_page_config(page_title="雲端公司中控台", layout="wide", page_icon="⏱")
-st.title("☁️ 公司營運中控台 (V16 精準圖表版)")
+st.set_page_config(page_title="雲端公司中控台", layout="wide", page_icon="🔭")
+st.title("☁️ 公司營運中控台 (V17 強制全圖版)")
 
 sh = connect_google_sheet()
 if not sh: st.stop()
@@ -78,7 +78,6 @@ if not df_trans.empty:
 if not df_projs.empty:
     df_projs['total_budget'] = pd.to_numeric(df_projs['total_budget'], errors='coerce').fillna(0)
     df_projs['progress'] = pd.to_numeric(df_projs['progress'], errors='coerce').fillna(0)
-    # 保留原始數據，不做過度填充，確保編輯時看到的是真的
     df_projs['start_date'] = pd.to_datetime(df_projs['start_date'], errors='coerce')
     df_projs['end_date'] = pd.to_datetime(df_projs['end_date'], errors='coerce')
 
@@ -104,26 +103,19 @@ col4.metric("🏦 總資金水位", f"${total_balance:,.0f}")
 st.divider()
 
 # ==========================================
-# 全景圖 (畫圖專用邏輯)
+# 全景圖 (核心修復)
 # ==========================================
 if not df_trans.empty or not df_projs.empty:
     
-    # 1. 複製資料給圖表用 (這裡的修改不會影響表格編輯)
+    # 1. 準備畫圖資料
     df_chart_projs = df_projs.copy()
     
     def prepare_chart_dates(row):
         s = row['start_date']
         e = row['end_date']
-        
-        # 補洞：如果沒開始時間，補今天
         if pd.isnull(s): s = datetime.today()
-        # 補洞：如果沒結束時間，補開始+30天
         if pd.isnull(e): e = s + timedelta(days=30)
-        
-        # 【關鍵修正】如果開始跟結束是同一天，強制讓結束日+1天，不然線條會消失看不見
-        if s == e:
-            e = s + timedelta(days=1)
-            
+        if s == e: e = s + timedelta(days=1)
         return s, e
 
     if not df_chart_projs.empty:
@@ -131,19 +123,29 @@ if not df_trans.empty or not df_projs.empty:
             lambda x: pd.Series(prepare_chart_dates(x)), axis=1
         )
 
-    # 2. 計算時間軸
+    # 2. 【關鍵】精準計算全域時間範圍
     all_dates = []
-    if not df_trans.empty: all_dates.extend(df_trans['date'].dropna().tolist())
+    if not df_trans.empty: 
+        all_dates.extend(df_trans['date'].dropna().tolist())
     if not df_chart_projs.empty: 
         all_dates.extend(df_chart_projs['start_date'].dropna().tolist())
+        # 這裡非常重要：一定要把專案的結束日期也加進去計算
         all_dates.extend(df_chart_projs['end_date'].dropna().tolist())
     
     if all_dates:
+        # 找出最早的一天 (通常是專案開始或第一筆記帳)
         min_date = min(all_dates).replace(day=1) 
-        max_date = max(all_dates) + timedelta(days=30)
+        # 找出最晚的一天 (例如 2026-12-01)
+        max_date_raw = max(all_dates)
+        # 強制往後延伸 1 個月做為緩衝 (讓 12月能完整顯示)
+        max_date = (max_date_raw + timedelta(days=32)).replace(day=1)
+        
+        # 建立完整的月份索引
         full_date_range = pd.date_range(start=min_date, end=max_date, freq='MS')
     else:
-        full_date_range = pd.date_range(start=date.today(), periods=3, freq='MS')
+        min_date = date.today()
+        max_date = date.today() + timedelta(days=90)
+        full_date_range = pd.date_range(start=min_date, end=max_date, freq='MS')
 
     # 3. 畫圖
     fig = make_subplots(
@@ -156,7 +158,9 @@ if not df_trans.empty or not df_projs.empty:
         df_chart = df_trans.copy()
         df_chart['PlotDate'] = df_chart['date'].apply(lambda x: x.replace(day=1))
         monthly_stats = df_chart.groupby(['PlotDate', 'type'])['amount'].sum().unstack(fill_value=0)
+        # 強制對齊所有月份
         monthly_stats = monthly_stats.reindex(full_date_range, fill_value=0)
+        
         if '收入' not in monthly_stats.columns: monthly_stats['收入'] = 0
         if '支出' not in monthly_stats.columns: monthly_stats['支出'] = 0
         monthly_stats['Cumulative'] = (monthly_stats['收入'] - monthly_stats['支出']).cumsum()
@@ -168,18 +172,14 @@ if not df_trans.empty or not df_projs.empty:
     if not df_chart_projs.empty:
         color_map = {"進行中": "#00CC96", "暫停": "#FFA15A", "結案": "#AB63FA"}
         df_p_sorted = df_chart_projs.sort_values("start_date")
-        
         for i, row in df_p_sorted.iterrows():
             status_color = color_map.get(row['status'], "#888888")
-            
-            # 格式化日期字串，顯示在 Tooltip
             s_str = row['start_date'].strftime('%Y-%m-%d')
             e_str = row['end_date'].strftime('%Y-%m-%d')
             
             fig.add_trace(go.Scatter(
                 x=[row['start_date'], row['end_date']], y=[row['name'], row['name']],
                 mode="lines", line=dict(color=status_color, width=20), name=row['name'], showlegend=False,
-                # 【優化】這裡的 hovertemplate 會明確告訴您圖表畫的是哪一天
                 hovertemplate=f"<b>{row['name']}</b><br>狀態: {row['status']}<br>開始: {s_str}<br>結束: {e_str}<br>進度: {row['progress']}%<extra></extra>"
             ), row=2, col=1)
 
@@ -187,7 +187,16 @@ if not df_trans.empty or not df_projs.empty:
         yaxis=dict(title="單月收支", showgrid=True), yaxis2=dict(title="累計水位", showgrid=False, overlaying='y', side='right'),
         yaxis3=dict(title="專案列表", automargin=True)
     )
-    fig.update_xaxes(tickformat="%Y-%m", dtick="M1", showgrid=True, gridwidth=1, gridcolor='rgba(211, 211, 211, 0.6)', griddash='dash', ticklabelmode="period")
+
+    # 【核心修正】強制指定 X 軸範圍 (Range)，不讓圖表自己亂切
+    fig.update_xaxes(
+        range=[min_date, max_date], # <--- 強制鎖定視野範圍
+        tickformat="%Y-%m", 
+        dtick="M1", 
+        showgrid=True, gridwidth=1, gridcolor='rgba(211, 211, 211, 0.6)', griddash='dash', 
+        ticklabelmode="period"
+    )
+
     st.plotly_chart(fig, use_container_width=True)
 
 else:
@@ -255,9 +264,8 @@ with tab1:
                                     new_val = new_val.strftime('%Y-%m-%d')
                                 ws_projs.update_cell(sheet_row, col_map[col_name], new_val)
                 
-                # 【關鍵修正】強制等待 1 秒，讓 Google 雲端有時間存檔
-                with st.spinner("正在同步至雲端，請稍候..."):
-                    time.sleep(1)
+                with st.spinner("正在同步至雲端..."):
+                    time.sleep(1.5) # 稍微增加等待時間，確保資料寫入後才讀取
                     
                 st.success("更新成功"); st.rerun()
             except Exception as e: st.error(f"儲存失敗: {e}")
@@ -312,8 +320,7 @@ with tab3:
                                 if isinstance(new_val, (date, datetime, pd.Timestamp)):
                                     new_val = new_val.strftime('%Y-%m-%d')
                                 ws_trans.update_cell(sheet_row, col_map_t[col_name], new_val)
-                # 同樣加入延遲，確保同步
                 with st.spinner("正在同步至雲端..."):
-                    time.sleep(1)
+                    time.sleep(1.5)
                 st.success("更新成功"); st.rerun()
             except Exception as e: st.error(f"儲存失敗: {e}")
