@@ -42,15 +42,15 @@ def init_sheets(sheet):
         return ws_trans, ws_projs
     except: return None, None
 
-st.set_page_config(page_title="雲端公司中控台", layout="wide", page_icon="🛡")
-st.title("☁️ 公司營運中控台 (V18 強力存檔版)")
+st.set_page_config(page_title="雲端公司中控台", layout="wide", page_icon="🧹")
+st.title("☁️ 公司營運中控台 (V19 強制校正版)")
 
 sh = connect_google_sheet()
 if not sh: st.stop()
 ws_trans, ws_projs = init_sheets(sh)
 
 # ==========================================
-# 資料讀取
+# 資料讀取 (改用絕對位置讀取，不依賴標題)
 # ==========================================
 raw_trans = ws_trans.get_all_values()
 if len(raw_trans) > 1:
@@ -59,19 +59,24 @@ else:
     df_trans = pd.DataFrame(columns=["date", "type", "category", "amount", "note", "project_name", "created_at"])
 
 raw_projs = ws_projs.get_all_values()
+
+# --- V19 核心：強制定義標準欄位順序 ---
+# 我們不相信 Google Sheet 的標題了，直接定義我們想要的結構
+# 0:name, 1:total_budget, 2:start_date, 3:status, 4:progress, 5:created_at, 6:end_date
+std_columns = ["name", "total_budget", "start_date", "status", "progress", "created_at", "end_date"]
+
 if len(raw_projs) > 1:
-    header = raw_projs[0]
-    # 確保 header 裡面有 end_date，否則後面處理會出錯
-    if "end_date" not in header: header.append("end_date")
-    
+    # 檢查並修復資料寬度
     clean_data = []
     for row in raw_projs[1:]:
-        # 每一列資料長度補齊
-        while len(row) < len(header): row.append("")
-        clean_data.append(row[:len(header)])
-    df_projs = pd.DataFrame(clean_data, columns=header)
+        # 如果資料少於 7 欄，補空字串
+        while len(row) < 7: row.append("")
+        # 如果資料多於 7 欄，切掉後面多餘的
+        clean_data.append(row[:7])
+    
+    df_projs = pd.DataFrame(clean_data, columns=std_columns)
 else:
-    df_projs = pd.DataFrame(columns=["name", "total_budget", "start_date", "status", "progress", "created_at", "end_date"])
+    df_projs = pd.DataFrame(columns=std_columns)
 
 # --- 資料型態轉換 ---
 if not df_trans.empty:
@@ -81,12 +86,13 @@ if not df_trans.empty:
 if not df_projs.empty:
     df_projs['total_budget'] = pd.to_numeric(df_projs['total_budget'], errors='coerce').fillna(0)
     df_projs['progress'] = pd.to_numeric(df_projs['progress'], errors='coerce').fillna(0)
-    # 【重點】這裡只轉型態，絕對不補預設值，確保編輯器看到的是「雲端原本的樣子」
+    
+    # 日期轉換 (保留 NaT 以便偵測問題)
     df_projs['start_date'] = pd.to_datetime(df_projs['start_date'], errors='coerce')
     df_projs['end_date'] = pd.to_datetime(df_projs['end_date'], errors='coerce')
 
 # ==========================================
-# 2. 戰情儀表板 (KPI)
+# 2. 戰情儀表板
 # ==========================================
 today = datetime.today()
 if not df_trans.empty:
@@ -111,17 +117,27 @@ st.divider()
 # ==========================================
 if not df_trans.empty or not df_projs.empty:
     
-    # 1. 複製資料給圖表用
     df_chart_projs = df_projs.copy()
     
-    # 圖表專用的補洞邏輯 (不影響原始資料)
+    # --- 診斷邏輯：檢查是否有日期讀取失敗 ---
+    diag_msg = []
+    
     def prepare_chart_dates(row):
         s = row['start_date']
         e = row['end_date']
+        
+        # 診斷：如果 e 是 NaT，代表轉換失敗或原始資料是空的
+        is_end_missing = pd.isnull(e)
+        
         if pd.isnull(s): s = datetime.today()
         if pd.isnull(e): e = s + timedelta(days=30)
-        # 確保單日專案也能看見
         if s == e: e = s + timedelta(days=1)
+        
+        # 如果原本是缺的，記錄下來告訴使用者
+        if is_end_missing:
+            # 這裡記錄哪一個專案使用了預設值
+            diag_msg.append(f"⚠️ {row['name']}: 結束日期無效，已用預設值 ({e.strftime('%Y-%m-%d')}) 繪圖")
+            
         return s, e
 
     if not df_chart_projs.empty:
@@ -129,7 +145,14 @@ if not df_trans.empty or not df_projs.empty:
             lambda x: pd.Series(prepare_chart_dates(x)), axis=1
         )
 
-    # 2. 計算全域時間範圍 (含所有專案起訖)
+    # 如果有使用預設值，顯示警告 (這能幫我們確認是不是讀取問題)
+    if diag_msg:
+        with st.expander("🔴 圖表診斷訊息 (點此查看為什麼日期不對)", expanded=True):
+            for msg in diag_msg:
+                st.write(msg)
+            st.caption("若出現此訊息，代表 Google 試算表該欄位為空，或格式錯誤。請在下方列表重新輸入日期並存檔。")
+
+    # 計算全域時間
     all_dates = []
     if not df_trans.empty: all_dates.extend(df_trans['date'].dropna().tolist())
     if not df_chart_projs.empty: 
@@ -139,7 +162,6 @@ if not df_trans.empty or not df_projs.empty:
     if all_dates:
         min_date = min(all_dates).replace(day=1) 
         max_date_raw = max(all_dates)
-        # 強制往後拉 30 天，確保 2026/12/01 的資料不會貼在圖表最邊緣
         max_date = (max_date_raw + timedelta(days=40)).replace(day=1)
         full_date_range = pd.date_range(start=min_date, end=max_date, freq='MS')
     else:
@@ -147,7 +169,7 @@ if not df_trans.empty or not df_projs.empty:
         max_date = date.today() + timedelta(days=90)
         full_date_range = pd.date_range(start=min_date, end=max_date, freq='MS')
 
-    # 3. 畫圖
+    # 畫圖
     fig = make_subplots(
         rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.1, row_heights=[0.5, 0.5],
         specs=[[{"secondary_y": True}], [{"secondary_y": False}]],
@@ -185,7 +207,6 @@ if not df_trans.empty or not df_projs.empty:
         yaxis=dict(title="單月收支", showgrid=True), yaxis2=dict(title="累計水位", showgrid=False, overlaying='y', side='right'),
         yaxis3=dict(title="專案列表", automargin=True)
     )
-    # 強制鎖定 X 軸範圍，確保長遠的未來也能看見
     fig.update_xaxes(
         range=[min_date, max_date], 
         tickformat="%Y-%m", dtick="M1", showgrid=True, gridwidth=1, gridcolor='rgba(211, 211, 211, 0.6)', griddash='dash', ticklabelmode="period"
@@ -198,7 +219,7 @@ else:
 st.divider()
 
 # ==========================================
-# 3. 功能分頁 (Excel 編輯模式)
+# 3. 功能分頁 (Excel 編輯模式 - 絕對定位版)
 # ==========================================
 tab1, tab2, tab3 = st.tabs(["🏗 專案管理", "✍️ 雲端記帳", "📋 帳務總表"])
 
@@ -215,7 +236,7 @@ with tab1:
             p_end = c5.date_input("預計結束", date.today() + timedelta(days=30))
             p_progress = c6.slider("進度", 0, 100, 0)
             if st.form_submit_button("新增到雲端"):
-                # 新增時也用最安全的寫法
+                # 新增時使用最安全的 List 寫入
                 ws_projs.append_row([
                     p_name, p_budget, str(p_start), p_status, p_progress, str(datetime.now()), str(p_end)
                 ])
@@ -232,46 +253,42 @@ with tab1:
                 "progress": st.column_config.ProgressColumn("進度", format="%d%%", min_value=0, max_value=100),
                 "start_date": st.column_config.DateColumn("開始日期"), 
                 "end_date": st.column_config.DateColumn("結束日期"),
-                "created_at": None # 隱藏
+                "created_at": None 
             }, hide_index=True
         )
 
         if st.button("💾 儲存專案變更"):
             try:
+                # 【V19 核心】強制校正 Google Sheet 標題列
+                # 這樣確保 Column 7 絕對是 end_date
+                ws_projs.update(range_name="A1:G1", values=[std_columns])
+                
                 changes = st.session_state["proj_editor"]
                 deleted_indices = changes.get("deleted_rows", [])
                 edited_cells = changes.get("edited_rows", {})
 
-                # 1. 刪除
                 if deleted_indices:
                     rows_to_delete = sorted([i + 2 for i in deleted_indices], reverse=True)
                     for r in rows_to_delete: ws_projs.delete_rows(r)
                 
-                # 2. 修改 (強力修復版)
                 if edited_cells:
-                    # A. 先抓目前雲端的標題列
-                    header_row = ws_projs.row_values(1)
-                    
-                    # B. 檢查標題列有沒有 end_date，沒有就強制補上
-                    if "end_date" not in header_row:
-                        ws_projs.update_cell(1, len(header_row) + 1, "end_date")
-                        header_row.append("end_date") # 更新本地變數
-                    
-                    # C. 建立地圖
-                    col_map = {name: i+1 for i, name in enumerate(header_row)}
+                    # 使用絕對位置地圖，不再依賴讀取回來的標題
+                    # 1:name, 2:budget, 3:start, 4:status, 5:progress, 6:created, 7:end
+                    col_map_fixed = {
+                        "name": 1, "total_budget": 2, "start_date": 3, 
+                        "status": 4, "progress": 5, "created_at": 6, "end_date": 7
+                    }
                     
                     for idx, change_dict in edited_cells.items():
                         sheet_row = idx + 2
                         if idx in deleted_indices: continue
                         
                         for col_name, new_val in change_dict.items():
-                            # 如果這個欄位在雲端找不到，就略過，避免報錯
-                            if col_name in col_map:
-                                # 強制轉日期字串
+                            if col_name in col_map_fixed:
                                 if isinstance(new_val, (date, datetime, pd.Timestamp)):
                                     new_val = new_val.strftime('%Y-%m-%d')
                                 
-                                ws_projs.update_cell(sheet_row, col_map[col_name], new_val)
+                                ws_projs.update_cell(sheet_row, col_map_fixed[col_name], new_val)
                 
                 with st.spinner("正在同步至雲端..."):
                     time.sleep(1.5)
