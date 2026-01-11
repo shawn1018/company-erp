@@ -5,7 +5,7 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 import json
 import plotly.graph_objects as go
-import plotly.express as px # 引入這一位來畫甘特圖
+import plotly.express as px
 
 # ==========================================
 # 1. Google Sheets 連線設定
@@ -43,24 +43,43 @@ def init_sheets(sheet):
     except: return None, None
 
 st.set_page_config(page_title="雲端公司中控台", layout="wide", page_icon="🗓")
-st.title("☁️ 公司營運中控台 (V8 時程甘特圖版)")
+st.title("☁️ 公司營運中控台 (V8.1 修復版)")
 
 sh = connect_google_sheet()
 if not sh: st.stop()
 ws_trans, ws_projs = init_sheets(sh)
 
-# 讀取資料
+# ==========================================
+# 資料讀取 (這裡做了防呆修復)
+# ==========================================
 raw_trans = ws_trans.get_all_values()
-df_trans = pd.DataFrame(raw_trans[1:], columns=raw_trans[0]) if len(raw_trans) > 1 else pd.DataFrame(columns=["date", "type", "category", "amount", "note", "project_name", "created_at"])
+if len(raw_trans) > 1:
+    df_trans = pd.DataFrame(raw_trans[1:], columns=raw_trans[0]) 
+else:
+    df_trans = pd.DataFrame(columns=["date", "type", "category", "amount", "note", "project_name", "created_at"])
 
 raw_projs = ws_projs.get_all_values()
-# 為了相容舊資料，如果舊資料沒有 end_date 欄位，我們手動補上
+
+# --- 🔴 關鍵修復開始：處理欄位不一致問題 ---
 if len(raw_projs) > 1:
-    cols = raw_projs[0]
-    if "end_date" not in cols: cols.append("end_date") # 防呆
-    df_projs = pd.DataFrame(raw_projs[1:], columns=cols)
+    header = raw_projs[0]
+    # 1. 確保標題列有 end_date
+    if "end_date" not in header:
+        header.append("end_date")
+    
+    # 2. 確保每一列資料長度都跟標題一樣長 (不夠的補空字串)
+    clean_data = []
+    for row in raw_projs[1:]:
+        # 如果這列資料比標題短，就補空白
+        while len(row) < len(header):
+            row.append("")
+        # 如果這列資料比標題長(很少見)，就切掉
+        clean_data.append(row[:len(header)])
+        
+    df_projs = pd.DataFrame(clean_data, columns=header)
 else:
     df_projs = pd.DataFrame(columns=["name", "total_budget", "start_date", "status", "progress", "created_at", "end_date"])
+# --- 🔴 關鍵修復結束 ---
 
 # 資料轉型
 if not df_trans.empty:
@@ -71,9 +90,20 @@ if not df_projs.empty:
     df_projs['total_budget'] = pd.to_numeric(df_projs['total_budget'], errors='coerce').fillna(0)
     df_projs['progress'] = pd.to_numeric(df_projs['progress'], errors='coerce').fillna(0)
     df_projs['start_date'] = pd.to_datetime(df_projs['start_date'], errors='coerce')
-    # 如果沒有結束日期，預設為開始日期 + 30天 (避免畫圖報錯)
-    if 'end_date' not in df_projs.columns: df_projs['end_date'] = df_projs['start_date'] + timedelta(days=30)
-    df_projs['end_date'] = pd.to_datetime(df_projs['end_date'], errors='coerce').fillna(df_projs['start_date'] + timedelta(days=30))
+    
+    # 補上預設結束日期 (防止舊資料沒有 end_date 導致畫圖報錯)
+    if 'end_date' not in df_projs.columns: df_projs['end_date'] = pd.NaT
+    
+    # 填充空值：如果沒有結束日期，預設為開始日期 + 30天
+    def fill_end_date(row):
+        if pd.isnull(row['end_date']) or str(row['end_date']).strip() == "":
+            if pd.notnull(row['start_date']):
+                return row['start_date'] + timedelta(days=30)
+            return date.today()
+        return row['end_date']
+
+    df_projs['end_date'] = df_projs.apply(fill_end_date, axis=1)
+    df_projs['end_date'] = pd.to_datetime(df_projs['end_date'], errors='coerce')
 
 # ==========================================
 # 2. 戰情儀表板
@@ -130,8 +160,6 @@ with chart_c1:
 with chart_c2:
     st.subheader("🗓 專案排程 (甘特圖)")
     if not df_projs.empty:
-        # 使用 Plotly Express 畫甘特圖
-        # 顏色依照「狀態」區分，讓人一眼看出哪些在進行中
         fig_gantt = px.timeline(
             df_projs, 
             x_start="start_date", 
@@ -142,7 +170,6 @@ with chart_c2:
             labels={"name": "專案名稱", "start_date": "開始", "end_date": "結束", "status": "狀態"},
             color_discrete_map={"進行中": "#00CC96", "暫停": "#FFA15A", "結案": "#AB63FA"}
         )
-        # 讓Y軸依照專案順序排列 (不要亂跳)，且隱藏下方滑桿
         fig_gantt.update_yaxes(autorange="reversed") 
         fig_gantt.update_layout(
             xaxis_title="日期區間",
@@ -170,14 +197,12 @@ with tab1:
             p_status = st.selectbox("狀態", ["進行中", "結案", "暫停"])
             p_progress = st.slider("進度", 0, 100, 0)
             
-            # V8 新增：時間選擇器
             st.write("⏱ **專案時程規劃**")
             col_d1, col_d2 = st.columns(2)
             p_start = col_d1.date_input("開始日期", date.today())
             p_end = col_d2.date_input("預計結束", date.today() + timedelta(days=30))
 
             if st.form_submit_button("上傳"):
-                # 寫入包含 end_date 的資料
                 ws_projs.append_row([
                     p_name, p_budget, str(p_start), p_status, p_progress, str(datetime.now()), str(p_end)
                 ])
@@ -193,13 +218,12 @@ with tab1:
                     p_cost = p_trans[p_trans['type'] == '支出']['amount'].sum()
                     p_rev = p_trans[p_trans['type'] == '收入']['amount'].sum()
                 
-                # 顯示日期區間
                 s_str = row['start_date'].strftime('%Y/%m/%d') if pd.notnull(row['start_date']) else ""
                 e_str = row['end_date'].strftime('%Y/%m/%d') if pd.notnull(row['end_date']) else ""
                 
                 proj_view.append({
                     "專案": row['name'], 
-                    "時程": f"{s_str} ~ {e_str}", # 新增顯示
+                    "時程": f"{s_str} ~ {e_str}", 
                     "預算": f"${row['total_budget']:,.0f}", 
                     "狀態": row['status'], 
                     "進度": f"{row['progress']}%", 
@@ -213,16 +237,22 @@ with tab1:
             sel_proj = st.selectbox("選擇專案", list(proj_opts.keys()))
             if sel_proj:
                 r_num = proj_opts[sel_proj]
+                # 這裡要小心，如果舊資料 raw_projs 的該列沒有 end_date 欄位，要防呆
                 curr = raw_projs[r_num-1]
+                
                 with st.form("edit_p"):
                     es = st.selectbox("狀態", ["進行中", "結案", "暫停"], index=["進行中", "結案", "暫停"].index(curr[3]) if curr[3] in ["進行中", "結案", "暫停"] else 0)
                     ep = st.slider("進度", 0, 100, int(float(curr[4])))
                     
-                    # 讀取舊的日期，如果沒有就用今天
                     try: old_start = datetime.strptime(curr[2], "%Y-%m-%d").date()
                     except: old_start = date.today()
-                    # end_date 是第 7 欄 (index 6)，如果舊資料沒有這一欄，要防呆
-                    try: old_end = datetime.strptime(curr[6], "%Y-%m-%d").date()
+                    
+                    # 防呆：如果 curr 沒有第 7 個元素 (index 6)，代表他是舊資料
+                    try: 
+                        if len(curr) > 6:
+                            old_end = datetime.strptime(curr[6], "%Y-%m-%d").date()
+                        else:
+                            old_end = old_start + timedelta(days=30)
                     except: old_end = old_start + timedelta(days=30)
 
                     ed1, ed2 = st.columns(2)
@@ -231,15 +261,14 @@ with tab1:
 
                     c_e, c_d = st.columns(2)
                     if c_e.form_submit_button("💾 更新"): 
-                        # 更新 Column 3 (start), 4 (status), 5 (progress), 7 (end)
                         ws_projs.update_cell(r_num, 3, str(new_start))
                         ws_projs.update_cell(r_num, 4, es)
                         ws_projs.update_cell(r_num, 5, ep)
-                        ws_projs.update_cell(r_num, 7, str(new_end)) # 更新結束日期
+                        ws_projs.update_cell(r_num, 7, str(new_end)) 
                         st.rerun()
                     if c_d.form_submit_button("🗑 刪除", type="primary"): ws_projs.delete_rows(r_num); st.rerun()
 
-with tab2: # 記帳 (維持 V7)
+with tab2: # 記帳
     if 'form_type' not in st.session_state: st.session_state.form_type = "支出"
     if 'form_cat' not in st.session_state: st.session_state.form_cat = "專案款"
     if 'form_note' not in st.session_state: st.session_state.form_note = ""
@@ -256,7 +285,7 @@ with tab2: # 記帳 (維持 V7)
         c4, c5 = st.columns(2); am = c4.number_input("金額", min_value=0); pr = c5.selectbox("歸屬", p_list); no = st.text_input("備註", value=st.session_state.form_note)
         if st.form_submit_button("寫入雲端"): ws_trans.append_row([str(d), ty, ca, am, no, pr, str(datetime.now())]); st.success("成功"); st.session_state.form_note=""; st.rerun()
 
-with tab3: # 報表 (維持 V7)
+with tab3: # 報表
     if len(raw_trans) > 1:
         st.dataframe(df_trans, use_container_width=True)
         st.divider()
