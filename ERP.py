@@ -42,8 +42,8 @@ def init_sheets(sheet):
         return ws_trans, ws_projs
     except: return None, None
 
-st.set_page_config(page_title="雲端公司中控台", layout="wide", page_icon="🔭")
-st.title("☁️ 公司營運中控台 (V17 強制全圖版)")
+st.set_page_config(page_title="雲端公司中控台", layout="wide", page_icon="🛡")
+st.title("☁️ 公司營運中控台 (V18 強力存檔版)")
 
 sh = connect_google_sheet()
 if not sh: st.stop()
@@ -61,9 +61,12 @@ else:
 raw_projs = ws_projs.get_all_values()
 if len(raw_projs) > 1:
     header = raw_projs[0]
+    # 確保 header 裡面有 end_date，否則後面處理會出錯
     if "end_date" not in header: header.append("end_date")
+    
     clean_data = []
     for row in raw_projs[1:]:
+        # 每一列資料長度補齊
         while len(row) < len(header): row.append("")
         clean_data.append(row[:len(header)])
     df_projs = pd.DataFrame(clean_data, columns=header)
@@ -78,6 +81,7 @@ if not df_trans.empty:
 if not df_projs.empty:
     df_projs['total_budget'] = pd.to_numeric(df_projs['total_budget'], errors='coerce').fillna(0)
     df_projs['progress'] = pd.to_numeric(df_projs['progress'], errors='coerce').fillna(0)
+    # 【重點】這裡只轉型態，絕對不補預設值，確保編輯器看到的是「雲端原本的樣子」
     df_projs['start_date'] = pd.to_datetime(df_projs['start_date'], errors='coerce')
     df_projs['end_date'] = pd.to_datetime(df_projs['end_date'], errors='coerce')
 
@@ -103,18 +107,20 @@ col4.metric("🏦 總資金水位", f"${total_balance:,.0f}")
 st.divider()
 
 # ==========================================
-# 全景圖 (核心修復)
+# 全景圖
 # ==========================================
 if not df_trans.empty or not df_projs.empty:
     
-    # 1. 準備畫圖資料
+    # 1. 複製資料給圖表用
     df_chart_projs = df_projs.copy()
     
+    # 圖表專用的補洞邏輯 (不影響原始資料)
     def prepare_chart_dates(row):
         s = row['start_date']
         e = row['end_date']
         if pd.isnull(s): s = datetime.today()
         if pd.isnull(e): e = s + timedelta(days=30)
+        # 確保單日專案也能看見
         if s == e: e = s + timedelta(days=1)
         return s, e
 
@@ -123,24 +129,18 @@ if not df_trans.empty or not df_projs.empty:
             lambda x: pd.Series(prepare_chart_dates(x)), axis=1
         )
 
-    # 2. 【關鍵】精準計算全域時間範圍
+    # 2. 計算全域時間範圍 (含所有專案起訖)
     all_dates = []
-    if not df_trans.empty: 
-        all_dates.extend(df_trans['date'].dropna().tolist())
+    if not df_trans.empty: all_dates.extend(df_trans['date'].dropna().tolist())
     if not df_chart_projs.empty: 
         all_dates.extend(df_chart_projs['start_date'].dropna().tolist())
-        # 這裡非常重要：一定要把專案的結束日期也加進去計算
         all_dates.extend(df_chart_projs['end_date'].dropna().tolist())
     
     if all_dates:
-        # 找出最早的一天 (通常是專案開始或第一筆記帳)
         min_date = min(all_dates).replace(day=1) 
-        # 找出最晚的一天 (例如 2026-12-01)
         max_date_raw = max(all_dates)
-        # 強制往後延伸 1 個月做為緩衝 (讓 12月能完整顯示)
-        max_date = (max_date_raw + timedelta(days=32)).replace(day=1)
-        
-        # 建立完整的月份索引
+        # 強制往後拉 30 天，確保 2026/12/01 的資料不會貼在圖表最邊緣
+        max_date = (max_date_raw + timedelta(days=40)).replace(day=1)
         full_date_range = pd.date_range(start=min_date, end=max_date, freq='MS')
     else:
         min_date = date.today()
@@ -158,9 +158,7 @@ if not df_trans.empty or not df_projs.empty:
         df_chart = df_trans.copy()
         df_chart['PlotDate'] = df_chart['date'].apply(lambda x: x.replace(day=1))
         monthly_stats = df_chart.groupby(['PlotDate', 'type'])['amount'].sum().unstack(fill_value=0)
-        # 強制對齊所有月份
         monthly_stats = monthly_stats.reindex(full_date_range, fill_value=0)
-        
         if '收入' not in monthly_stats.columns: monthly_stats['收入'] = 0
         if '支出' not in monthly_stats.columns: monthly_stats['支出'] = 0
         monthly_stats['Cumulative'] = (monthly_stats['收入'] - monthly_stats['支出']).cumsum()
@@ -187,16 +185,11 @@ if not df_trans.empty or not df_projs.empty:
         yaxis=dict(title="單月收支", showgrid=True), yaxis2=dict(title="累計水位", showgrid=False, overlaying='y', side='right'),
         yaxis3=dict(title="專案列表", automargin=True)
     )
-
-    # 【核心修正】強制指定 X 軸範圍 (Range)，不讓圖表自己亂切
+    # 強制鎖定 X 軸範圍，確保長遠的未來也能看見
     fig.update_xaxes(
-        range=[min_date, max_date], # <--- 強制鎖定視野範圍
-        tickformat="%Y-%m", 
-        dtick="M1", 
-        showgrid=True, gridwidth=1, gridcolor='rgba(211, 211, 211, 0.6)', griddash='dash', 
-        ticklabelmode="period"
+        range=[min_date, max_date], 
+        tickformat="%Y-%m", dtick="M1", showgrid=True, gridwidth=1, gridcolor='rgba(211, 211, 211, 0.6)', griddash='dash', ticklabelmode="period"
     )
-
     st.plotly_chart(fig, use_container_width=True)
 
 else:
@@ -205,7 +198,7 @@ else:
 st.divider()
 
 # ==========================================
-# 3. 功能分頁
+# 3. 功能分頁 (Excel 編輯模式)
 # ==========================================
 tab1, tab2, tab3 = st.tabs(["🏗 專案管理", "✍️ 雲端記帳", "📋 帳務總表"])
 
@@ -222,7 +215,10 @@ with tab1:
             p_end = c5.date_input("預計結束", date.today() + timedelta(days=30))
             p_progress = c6.slider("進度", 0, 100, 0)
             if st.form_submit_button("新增到雲端"):
-                ws_projs.append_row([p_name, p_budget, str(p_start), p_status, p_progress, str(datetime.now()), str(p_end)])
+                # 新增時也用最安全的寫法
+                ws_projs.append_row([
+                    p_name, p_budget, str(p_start), p_status, p_progress, str(datetime.now()), str(p_end)
+                ])
                 st.success("新增成功"); st.rerun()
 
     st.subheader("專案列表 (Excel 編輯模式)")
@@ -236,7 +232,7 @@ with tab1:
                 "progress": st.column_config.ProgressColumn("進度", format="%d%%", min_value=0, max_value=100),
                 "start_date": st.column_config.DateColumn("開始日期"), 
                 "end_date": st.column_config.DateColumn("結束日期"),
-                "created_at": None 
+                "created_at": None # 隱藏
             }, hide_index=True
         )
 
@@ -246,12 +242,22 @@ with tab1:
                 deleted_indices = changes.get("deleted_rows", [])
                 edited_cells = changes.get("edited_rows", {})
 
+                # 1. 刪除
                 if deleted_indices:
                     rows_to_delete = sorted([i + 2 for i in deleted_indices], reverse=True)
                     for r in rows_to_delete: ws_projs.delete_rows(r)
                 
+                # 2. 修改 (強力修復版)
                 if edited_cells:
+                    # A. 先抓目前雲端的標題列
                     header_row = ws_projs.row_values(1)
+                    
+                    # B. 檢查標題列有沒有 end_date，沒有就強制補上
+                    if "end_date" not in header_row:
+                        ws_projs.update_cell(1, len(header_row) + 1, "end_date")
+                        header_row.append("end_date") # 更新本地變數
+                    
+                    # C. 建立地圖
                     col_map = {name: i+1 for i, name in enumerate(header_row)}
                     
                     for idx, change_dict in edited_cells.items():
@@ -259,14 +265,16 @@ with tab1:
                         if idx in deleted_indices: continue
                         
                         for col_name, new_val in change_dict.items():
+                            # 如果這個欄位在雲端找不到，就略過，避免報錯
                             if col_name in col_map:
+                                # 強制轉日期字串
                                 if isinstance(new_val, (date, datetime, pd.Timestamp)):
                                     new_val = new_val.strftime('%Y-%m-%d')
+                                
                                 ws_projs.update_cell(sheet_row, col_map[col_name], new_val)
                 
                 with st.spinner("正在同步至雲端..."):
-                    time.sleep(1.5) # 稍微增加等待時間，確保資料寫入後才讀取
-                    
+                    time.sleep(1.5)
                 st.success("更新成功"); st.rerun()
             except Exception as e: st.error(f"儲存失敗: {e}")
 
