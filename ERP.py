@@ -5,6 +5,7 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 import json
 import plotly.graph_objects as go
+import plotly.express as px  # <---【關鍵修復】補上這行，統計報表就會正常了
 from plotly.subplots import make_subplots
 import time
 
@@ -149,8 +150,7 @@ if not df_trans.empty or not df_projs.empty:
     
     if all_dates:
         min_date = min(all_dates).replace(day=1) 
-        max_date_raw = max(all_dates)
-        max_date = (max_date_raw + timedelta(days=40)).replace(day=1)
+        max_date = (max(all_dates) + timedelta(days=40)).replace(day=1)
         full_date_range = pd.date_range(start=min_date, end=max_date, freq='MS')
     else:
         min_date = date.today(); max_date = date.today() + timedelta(days=90); full_date_range = pd.date_range(start=min_date, end=max_date, freq='MS')
@@ -173,28 +173,18 @@ if not df_trans.empty or not df_projs.empty:
     if not df_chart_projs.empty:
         color_map = {"進行中": "#00CC96", "暫停": "#FFA15A", "結案": "#AB63FA"}
         df_p_sorted = df_chart_projs.sort_values("start_date")
-        
         for i, row in df_p_sorted.iterrows():
             status_color = color_map.get(row['status'], "#888888")
             s = row['start_date']; e = row['end_date']; m = row['mid_date']
             s_str = s.strftime('%Y-%m-%d'); e_str = e.strftime('%Y-%m-%d'); m_str = m.strftime('%Y-%m-%d') if pd.notnull(m) else ""
 
-            # --- V28 新增：計算該專案總收入 ---
+            # 計算該專案收入 (V28)
             proj_income_sum = 0
             if not df_trans.empty:
-                # 篩選該專案 + 類型為收入
-                proj_income_sum = df_trans[
-                    (df_trans['project_name'] == row['name']) & 
-                    (df_trans['type'] == '收入')
-                ]['amount'].sum()
-            
-            # 設定顯示文字 (如果有錢才顯示)
+                proj_income_sum = df_trans[(df_trans['project_name'] == row['name']) & (df_trans['type'] == '收入')]['amount'].sum()
             income_label = f"💰${proj_income_sum:,.0f}" if proj_income_sum > 0 else ""
-            
-            # 計算文字顯示位置 (時間軸中間)
             mid_time_point = s + (e - s) / 2
 
-            # 畫橫條
             if pd.notnull(m) and s < m < e:
                 fig.add_trace(go.Scatter(x=[s, m], y=[row['name'], row['name']], mode="lines+markers", line=dict(color=status_color, width=20), marker=dict(symbol="line-ns", size=10, color="white"), name=row['name'], showlegend=False, hovertemplate=f"<b>{row['name']}</b><br>前期: {s_str}~{m_str}<extra></extra>"), row=2, col=1)
                 fig.add_trace(go.Scatter(x=[m, e], y=[row['name'], row['name']], mode="lines", line=dict(color=status_color, width=20), opacity=0.4, name=row['name'], showlegend=False, hovertemplate=f"<b>{row['name']}</b><br>後期: {m_str}~{e_str}<extra></extra>"), row=2, col=1)
@@ -202,18 +192,8 @@ if not df_trans.empty or not df_projs.empty:
             else:
                 fig.add_trace(go.Scatter(x=[s, e], y=[row['name'], row['name']], mode="lines", line=dict(color=status_color, width=20), name=row['name'], showlegend=False, hovertemplate=f"<b>{row['name']}</b><br>{s_str}~{e_str}<extra></extra>"), row=2, col=1)
 
-            # --- V28 新增：畫上收入文字 ---
             if income_label:
-                fig.add_trace(go.Scatter(
-                    x=[mid_time_point], 
-                    y=[row['name']],
-                    mode="text",
-                    text=[income_label],
-                    textposition="top center", # 顯示在橫條上方
-                    textfont=dict(size=12, color="#333333"),
-                    showlegend=False,
-                    hoverinfo='skip' # 滑鼠移上去不要擋住原本的資訊
-                ), row=2, col=1)
+                fig.add_trace(go.Scatter(x=[mid_time_point], y=[row['name']], mode="text", text=[income_label], textposition="top center", textfont=dict(size=12, color="#333333"), showlegend=False, hoverinfo='skip'), row=2, col=1)
 
     fig.update_layout(height=700, barmode='group', legend=dict(orientation="h", y=1.1, x=0), 
         yaxis=dict(title="單月收支", showgrid=True, gridcolor='lightgray', tickformat="s"),
@@ -357,7 +337,8 @@ with tab2:
         no = st.text_input("備註", value=st.session_state.form_note)
         if st.form_submit_button("寫入雲端"): 
             ws_trans.append_row([str(d), ty, ca, am, no, pr, str(datetime.now())])
-            st.success("成功"); st.session_state.form_note=""; st.rerun()
+            st.session_state.form_note=""
+            save_and_reload()
 
 # --- Tab 3: 報表修改 ---
 with tab3:
