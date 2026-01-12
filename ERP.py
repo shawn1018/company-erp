@@ -38,12 +38,13 @@ def init_sheets(sheet):
         try: ws_projs = sheet.worksheet("Projects")
         except:
             ws_projs = sheet.add_worksheet(title="Projects", rows=100, cols=10)
-            ws_projs.append_row(["name", "total_budget", "start_date", "status", "progress", "created_at", "end_date"])
+            # V21 新增 mid_date 欄位
+            ws_projs.append_row(["name", "total_budget", "start_date", "status", "progress", "created_at", "end_date", "mid_date"])
         return ws_trans, ws_projs
     except: return None, None
 
-st.set_page_config(page_title="雲端公司中控台", layout="wide", page_icon="🗂️")
-st.title("☁️ 公司營運中控台 (V20 月份分組版)")
+st.set_page_config(page_title="雲端公司中控台", layout="wide", page_icon="🔸")
+st.title("☁️ 公司營運中控台 (V21 里程碑甘特圖)")
 
 sh = connect_google_sheet()
 if not sh: st.stop()
@@ -55,22 +56,24 @@ ws_trans, ws_projs = init_sheets(sh)
 raw_trans = ws_trans.get_all_values()
 if len(raw_trans) > 1:
     df_trans = pd.DataFrame(raw_trans[1:], columns=raw_trans[0])
-    # 【關鍵】加入原始列號 (Row Index)，因為分組後 Index 會亂掉，存檔需要靠這個定位
     df_trans['_sheet_row'] = range(2, len(df_trans) + 2)
 else:
     df_trans = pd.DataFrame(columns=["date", "type", "category", "amount", "note", "project_name", "created_at", "_sheet_row"])
 
 raw_projs = ws_projs.get_all_values()
+
+# --- V21: 定義標準欄位 (新增 mid_date) ---
+# 0:name, 1:budget, 2:start, 3:status, 4:progress, 5:created, 6:end, 7:mid
+std_columns = ["name", "total_budget", "start_date", "status", "progress", "created_at", "end_date", "mid_date"]
+
 if len(raw_projs) > 1:
-    header = raw_projs[0]
-    if "end_date" not in header: header.append("end_date")
     clean_data = []
     for row in raw_projs[1:]:
-        while len(row) < len(header): row.append("")
-        clean_data.append(row[:len(header)])
-    df_projs = pd.DataFrame(clean_data, columns=header)
+        while len(row) < 8: row.append("") # 補齊到 8 欄
+        clean_data.append(row[:8])
+    df_projs = pd.DataFrame(clean_data, columns=std_columns)
 else:
-    df_projs = pd.DataFrame(columns=["name", "total_budget", "start_date", "status", "progress", "created_at", "end_date"])
+    df_projs = pd.DataFrame(columns=std_columns)
 
 # --- 資料型態轉換 ---
 if not df_trans.empty:
@@ -82,6 +85,7 @@ if not df_projs.empty:
     df_projs['progress'] = pd.to_numeric(df_projs['progress'], errors='coerce').fillna(0)
     df_projs['start_date'] = pd.to_datetime(df_projs['start_date'], errors='coerce')
     df_projs['end_date'] = pd.to_datetime(df_projs['end_date'], errors='coerce')
+    df_projs['mid_date'] = pd.to_datetime(df_projs['mid_date'], errors='coerce') # 新增轉換
 
 # ==========================================
 # 2. 戰情儀表板 (KPI)
@@ -105,25 +109,31 @@ col4.metric("🏦 總資金水位", f"${total_balance:,.0f}")
 st.divider()
 
 # ==========================================
-# 全景圖
+# 全景圖 (核心功能)
 # ==========================================
 if not df_trans.empty or not df_projs.empty:
     
     df_chart_projs = df_projs.copy()
     
+    # 圖表補洞邏輯
     def prepare_chart_dates(row):
         s = row['start_date']
         e = row['end_date']
+        m = row['mid_date']
         if pd.isnull(s): s = datetime.today()
         if pd.isnull(e): e = s + timedelta(days=30)
         if s == e: e = s + timedelta(days=1)
-        return s, e
+        # 確保 mid 在 start 和 end 之間，否則忽略
+        if pd.notnull(m) and not (s < m < e):
+            m = pd.NaT 
+        return s, e, m
 
     if not df_chart_projs.empty:
-        df_chart_projs[['start_date', 'end_date']] = df_chart_projs.apply(
+        df_chart_projs[['start_date', 'end_date', 'mid_date']] = df_chart_projs.apply(
             lambda x: pd.Series(prepare_chart_dates(x)), axis=1
         )
 
+    # 計算全域時間
     all_dates = []
     if not df_trans.empty: all_dates.extend(df_trans['date'].dropna().tolist())
     if not df_chart_projs.empty: 
@@ -146,6 +156,7 @@ if not df_trans.empty or not df_projs.empty:
         subplot_titles=("💰 財務收支與水位", "🗓 專案時程概況")
     )
 
+    # 上圖：財務
     if not df_trans.empty:
         df_chart = df_trans.copy()
         df_chart['PlotDate'] = df_chart['date'].apply(lambda x: x.replace(day=1))
@@ -159,19 +170,61 @@ if not df_trans.empty or not df_projs.empty:
         fig.add_trace(go.Bar(x=monthly_stats.index, y=monthly_stats['支出'], name='支出', marker_color='#EF553B', opacity=0.7), row=1, col=1, secondary_y=False)
         fig.add_trace(go.Scatter(x=monthly_stats.index, y=monthly_stats['Cumulative'], name='資金水位', mode='lines+markers', line=dict(color='#636EFA', width=3)), row=1, col=1, secondary_y=True)
 
+    # 下圖：甘特圖 (V21 分段邏輯)
     if not df_chart_projs.empty:
+        # 定義狀態顏色
         color_map = {"進行中": "#00CC96", "暫停": "#FFA15A", "結案": "#AB63FA"}
+        
         df_p_sorted = df_chart_projs.sort_values("start_date")
+        
         for i, row in df_p_sorted.iterrows():
             status_color = color_map.get(row['status'], "#888888")
-            s_str = row['start_date'].strftime('%Y-%m-%d')
-            e_str = row['end_date'].strftime('%Y-%m-%d')
+            s = row['start_date']
+            e = row['end_date']
+            m = row['mid_date']
             
-            fig.add_trace(go.Scatter(
-                x=[row['start_date'], row['end_date']], y=[row['name'], row['name']],
-                mode="lines", line=dict(color=status_color, width=20), name=row['name'], showlegend=False,
-                hovertemplate=f"<b>{row['name']}</b><br>狀態: {row['status']}<br>開始: {s_str}<br>結束: {e_str}<br>進度: {row['progress']}%<extra></extra>"
-            ), row=2, col=1)
+            s_str = s.strftime('%Y-%m-%d')
+            e_str = e.strftime('%Y-%m-%d')
+            m_str = m.strftime('%Y-%m-%d') if pd.notnull(m) else ""
+
+            # 邏輯：如果有期中驗收，且時間合理，就切成兩段
+            if pd.notnull(m) and s < m < e:
+                # 第一段：開始 -> 驗收 (深色)
+                fig.add_trace(go.Scatter(
+                    x=[s, m], y=[row['name'], row['name']],
+                    mode="lines+markers", 
+                    line=dict(color=status_color, width=20),
+                    marker=dict(symbol="line-ns", size=10, color="white"), # 端點修飾
+                    name=row['name'], showlegend=False,
+                    hovertemplate=f"<b>{row['name']} (前期)</b><br>區間: {s_str} ~ {m_str}<br>狀態: {row['status']}<extra></extra>"
+                ), row=2, col=1)
+                
+                # 第二段：驗收 -> 結束 (淺色/半透明)
+                fig.add_trace(go.Scatter(
+                    x=[m, e], y=[row['name'], row['name']],
+                    mode="lines", 
+                    line=dict(color=status_color, width=20), # Plotly 線條透明度難設，這裡用同樣顏色代表延續，但在中間加標記
+                    opacity=0.4, # 讓後半段變淡
+                    name=row['name'], showlegend=False,
+                    hovertemplate=f"<b>{row['name']} (後期)</b><br>區間: {m_str} ~ {e_str}<br>狀態: {row['status']}<extra></extra>"
+                ), row=2, col=1)
+
+                # 驗收點標記 (菱形)
+                fig.add_trace(go.Scatter(
+                    x=[m], y=[row['name']],
+                    mode="markers",
+                    marker=dict(symbol="diamond", size=12, color="gold", line=dict(width=1, color="black")),
+                    name="期中驗收", showlegend=False,
+                    hovertemplate=f"🔸 期中驗收點: {m_str}<extra></extra>"
+                ), row=2, col=1)
+
+            else:
+                # 沒有驗收點，畫一條完整的
+                fig.add_trace(go.Scatter(
+                    x=[s, e], y=[row['name'], row['name']],
+                    mode="lines", line=dict(color=status_color, width=20), name=row['name'], showlegend=False,
+                    hovertemplate=f"<b>{row['name']}</b><br>狀態: {row['status']}<br>開始: {s_str}<br>結束: {e_str}<extra></extra>"
+                ), row=2, col=1)
 
     fig.update_layout(height=700, barmode='group', legend=dict(orientation="h", y=1.1, x=0),
         yaxis=dict(title="單月收支", showgrid=True), yaxis2=dict(title="累計水位", showgrid=False, overlaying='y', side='right'),
@@ -191,23 +244,29 @@ st.divider()
 # ==========================================
 # 3. 功能分頁
 # ==========================================
-tab1, tab2, tab3 = st.tabs(["🏗 專案管理", "✍️ 雲端記帳", "📋 帳務總表 (月份分組)"])
+tab1, tab2, tab3 = st.tabs(["🏗 專案管理", "✍️ 雲端記帳", "📋 帳務總表"])
 
 # --- Tab 1: 專案管理 ---
 with tab1: 
-    with st.expander("➕ 新增專案 (點此展開)"):
+    with st.expander("➕ 新增專案 (含驗收日)"):
         with st.form("add_proj"):
             c1, c2, c3 = st.columns(3)
             p_name = c1.text_input("專案名稱")
             p_budget = c2.number_input("預算", min_value=0)
             p_status = c3.selectbox("狀態", ["進行中", "結案", "暫停"])
+            
             c4, c5, c6 = st.columns(3)
             p_start = c4.date_input("開始日期", date.today())
-            p_end = c5.date_input("預計結束", date.today() + timedelta(days=30))
-            p_progress = c6.slider("進度", 0, 100, 0)
+            # 選填的期中驗收
+            p_mid = c5.date_input("🔸 期中驗收 (選填)", value=None)
+            p_end = c6.date_input("預計結束", date.today() + timedelta(days=30))
+            
+            p_progress = st.slider("進度", 0, 100, 0)
+            
             if st.form_submit_button("新增到雲端"):
+                mid_str = str(p_mid) if p_mid else ""
                 ws_projs.append_row([
-                    p_name, p_budget, str(p_start), p_status, p_progress, str(datetime.now()), str(p_end)
+                    p_name, p_budget, str(p_start), p_status, p_progress, str(datetime.now()), str(p_end), mid_str
                 ])
                 st.success("新增成功"); st.rerun()
 
@@ -221,6 +280,7 @@ with tab1:
                 "status": st.column_config.SelectboxColumn("狀態", options=["進行中", "結案", "暫停"]),
                 "progress": st.column_config.ProgressColumn("進度", format="%d%%", min_value=0, max_value=100),
                 "start_date": st.column_config.DateColumn("開始日期"), 
+                "mid_date": st.column_config.DateColumn("🔸 期中驗收"), # 新增編輯欄位
                 "end_date": st.column_config.DateColumn("結束日期"),
                 "created_at": None 
             }, hide_index=True
@@ -228,12 +288,12 @@ with tab1:
 
         if st.button("💾 儲存專案變更"):
             try:
-                # 專案標題校正
+                # 1. 確保 header 有 mid_date
                 header_row = ws_projs.row_values(1)
-                if "end_date" not in header_row:
-                    ws_projs.update_cell(1, len(header_row) + 1, "end_date")
-                    header_row.append("end_date")
-                
+                if "mid_date" not in header_row:
+                    ws_projs.update_cell(1, len(header_row) + 1, "mid_date")
+                    header_row.append("mid_date")
+
                 changes = st.session_state["proj_editor"]
                 deleted_indices = changes.get("deleted_rows", [])
                 edited_cells = changes.get("edited_rows", {})
@@ -253,11 +313,11 @@ with tab1:
                                     new_val = new_val.strftime('%Y-%m-%d')
                                 ws_projs.update_cell(sheet_row, col_map[col_name], new_val)
                 
-                with st.spinner("正在同步至雲端..."): time.sleep(1.5)
+                with st.spinner("同步中..."): time.sleep(1.5)
                 st.success("更新成功"); st.rerun()
             except Exception as e: st.error(f"儲存失敗: {e}")
 
-# --- Tab 2: 記帳 ---
+# --- Tab 2 & 3 (保持 V20 功能) ---
 with tab2:
     if 'form_type' not in st.session_state: st.session_state.form_type = "支出"
     if 'form_cat' not in st.session_state: st.session_state.form_cat = "專案款"
@@ -275,118 +335,53 @@ with tab2:
         c4, c5 = st.columns(2); am = c4.number_input("金額", min_value=0); pr = c5.selectbox("歸屬", p_list); no = st.text_input("備註", value=st.session_state.form_note)
         if st.form_submit_button("寫入雲端"): ws_trans.append_row([str(d), ty, ca, am, no, pr, str(datetime.now())]); st.success("成功"); st.session_state.form_note=""; st.rerun()
 
-# --- Tab 3: 報表修改 (按月份分組) ---
 with tab3:
     st.subheader("📋 帳務總表 (按月分組)")
-    st.caption("💡 點擊月份標題可展開/收合。所有修改請在最後按一次「💾 儲存所有變更」。")
-    
     if not df_trans.empty:
-        # 1. 產生月份分組 Key
         df_trans['YearMonth'] = df_trans['date'].dt.strftime('%Y-%m')
-        # 排序：越新的月份在越上面
         grouped = df_trans.groupby('YearMonth')
-        # 取得排序後的月份列表 (降序)
         sorted_months = sorted(list(grouped.groups.keys()), reverse=True)
-        
-        # 用來蒐集每個月份編輯器的變更
         all_editors = {}
-
-        # 2. 迴圈產生每個月份的 Expander 和 DataEditor
         for month in sorted_months:
             group_df = grouped.get_group(month).sort_values('date', ascending=False)
-            
-            # 計算該月摘要
             m_inc = group_df[group_df['type']=='收入']['amount'].sum()
             m_exp = group_df[group_df['type']=='支出']['amount'].sum()
-            count = len(group_df)
-            
-            with st.expander(f"📅 {month} (共{count}筆) | 🟢 +${m_inc:,.0f} | 🔴 -${m_exp:,.0f}"):
-                # 這裡的 key 必須唯一，我們用 editor_2024-02 這樣的格式
+            with st.expander(f"📅 {month} (共{len(group_df)}筆) | 🟢 +${m_inc:,.0f} | 🔴 -${m_exp:,.0f}"):
                 editor_key = f"editor_{month}"
                 st.data_editor(
-                    group_df,
-                    key=editor_key,
-                    num_rows="dynamic",
-                    use_container_width=True,
-                    column_config={
-                        "date": st.column_config.DateColumn("日期"), 
-                        "type": st.column_config.SelectboxColumn("類型", options=["支出", "收入"]),
-                        "category": st.column_config.SelectboxColumn("科目", options=["專案款", "薪資", "房租", "外包", "軟硬體", "雜支"]),
-                        "amount": st.column_config.NumberColumn("金額", format="$%d"), 
-                        "project_name": "歸屬專案", "note": "備註",
-                        "created_at": None,
-                        "_sheet_row": None # 隱藏系統用的列號
-                    },
-                    hide_index=True
+                    group_df, key=editor_key, num_rows="dynamic", use_container_width=True,
+                    column_config={"date": st.column_config.DateColumn("日期"), "type": st.column_config.SelectboxColumn("類型", options=["支出", "收入"]), "category": st.column_config.SelectboxColumn("科目", options=["專案款", "薪資", "房租", "外包", "軟硬體", "雜支"]), "amount": st.column_config.NumberColumn("金額", format="$%d"), "project_name": "歸屬專案", "note": "備註", "created_at": None, "_sheet_row": None}, hide_index=True
                 )
-                all_editors[month] = group_df # 把原始對照表存起來
-
-        # 3. 全域儲存按鈕
+                all_editors[month] = group_df
         st.divider()
         if st.button("💾 儲存所有帳務變更", type="primary"):
             try:
                 rows_to_delete = []
                 updates_to_perform = []
-                
                 header_row_t = ws_trans.row_values(1)
                 col_map_t = {name: i+1 for i, name in enumerate(header_row_t)}
-
-                # 遍歷所有月份的編輯器狀態
                 for month in sorted_months:
                     editor_key = f"editor_{month}"
                     changes = st.session_state.get(editor_key)
                     if not changes: continue
-                    
                     original_group_df = all_editors[month]
-                    
-                    # 收集刪除 (Deleted Rows)
-                    # 注意：st.data_editor 的 index 是相對 index (0, 1, 2...)
-                    # 我們要用這個 index 去查 original_group_df 裡的 _sheet_row
                     for rel_idx in changes.get("deleted_rows", []):
-                        # 找出這個相對 index 對應的真實 Google Sheet Row
-                        real_sheet_row = original_group_df.iloc[rel_idx]['_sheet_row']
-                        rows_to_delete.append(real_sheet_row)
-
-                    # 收集修改 (Edited Rows)
+                        rows_to_delete.append(original_group_df.iloc[rel_idx]['_sheet_row'])
                     for rel_idx_str, change_dict in changes.get("edited_rows", {}).items():
                         rel_idx = int(rel_idx_str)
-                        if rel_idx in changes.get("deleted_rows", []): continue # 已刪除的不改
-                        
+                        if rel_idx in changes.get("deleted_rows", []): continue
                         real_sheet_row = original_group_df.iloc[rel_idx]['_sheet_row']
-                        
                         for col_name, new_val in change_dict.items():
                             if col_name in col_map_t:
-                                if isinstance(new_val, (date, datetime, pd.Timestamp)):
-                                    new_val = new_val.strftime('%Y-%m-%d')
+                                if isinstance(new_val, (date, datetime, pd.Timestamp)): new_val = new_val.strftime('%Y-%m-%d')
                                 updates_to_perform.append((real_sheet_row, col_map_t[col_name], new_val))
-
-                # 執行批量刪除 (必須從大到小刪，不然列號會跑掉)
                 if rows_to_delete:
-                    # 去除重複並排序
-                    unique_rows = sorted(list(set(rows_to_delete)), reverse=True)
-                    for r in unique_rows:
-                        ws_trans.delete_rows(r)
-                
-                # 執行批量更新
-                # (注意：如果剛剛有刪除，這裡的 row 可能已經跑掉，這是一個潛在風險)
-                # V20 策略：為了安全，如果同時有刪除和修改，建議分兩次操作。
-                # 但為了方便，我們假設使用者不會對「同一列」又刪又改。
-                # 可是「刪除第 10 列」會導致「原本第 11 列變第 10 列」。
-                # 簡單解法：如果有刪除，就先只做刪除，請使用者重整後再改；或者倒過來先改再刪 (但這也有風險)。
-                # 最佳解：我們只做更新，如果有刪除，則更新的部分可能會有誤差。
-                # 為了數據安全，如果偵測到有刪除操作，我們優先執行刪除，並重新載入，略過修改。
-                
-                if rows_to_delete:
-                    st.warning("偵測到刪除操作，已優先執行刪除。若您同時有修改資料，請在頁面重整後再次確認修改。")
+                    for r in sorted(list(set(rows_to_delete)), reverse=True): ws_trans.delete_rows(r)
+                    st.warning("已執行刪除")
                 elif updates_to_perform:
-                    for row, col, val in updates_to_perform:
-                        ws_trans.update_cell(row, col, val)
-                    st.success("所有修改已儲存！")
-                
+                    for row, col, val in updates_to_perform: ws_trans.update_cell(row, col, val)
+                    st.success("修改已儲存")
                 with st.spinner("同步中..."): time.sleep(1.5)
                 st.rerun()
-
-            except Exception as e:
-                st.error(f"儲存失敗: {e}")
-    else:
-        st.info("目前沒有帳務資料")
+            except Exception as e: st.error(f"儲存失敗: {e}")
+    else: st.info("無帳務資料")
