@@ -30,38 +30,30 @@ def connect_google_sheet():
 
 def init_sheets(sheet):
     try:
-        # 1. 交易表
         try: ws_trans = sheet.worksheet("Transactions")
         except:
             ws_trans = sheet.add_worksheet(title="Transactions", rows=1000, cols=10)
             ws_trans.append_row(["date", "type", "category", "amount", "note", "project_name", "created_at"])
         
-        # 2. 專案表
         try: ws_projs = sheet.worksheet("Projects")
         except:
             ws_projs = sheet.add_worksheet(title="Projects", rows=100, cols=10)
             ws_projs.append_row(["name", "total_budget", "start_date", "status", "progress", "created_at", "end_date", "mid_date"])
             
-        # 3. 設定表 (V23: 新增 attribution_list 欄位)
         try: ws_settings = sheet.worksheet("Settings")
         except:
             ws_settings = sheet.add_worksheet(title="Settings", rows=100, cols=5)
-            # 第一列標題: Col 1=科目, Col 2=歸屬
             ws_settings.append_row(["category_list", "attribution_list"])
             # 預設值
-            ws_settings.update_cell(2, 1, "專案款")
-            ws_settings.update_cell(3, 1, "薪資")
-            ws_settings.update_cell(4, 1, "房租")
-            ws_settings.update_cell(5, 1, "外包")
-            ws_settings.update_cell(6, 1, "雜支")
-            
-            ws_settings.update_cell(2, 2, "公司固定開銷") # 預設歸屬
+            for i, cat in enumerate(["專案款", "薪資", "房租", "外包", "雜支"]):
+                ws_settings.update_cell(i+2, 1, cat)
+            ws_settings.update_cell(2, 2, "公司固定開銷")
                 
         return ws_trans, ws_projs, ws_settings
     except: return None, None, None
 
-st.set_page_config(page_title="雲端公司中控台", layout="wide", page_icon="⚙️")
-st.title("☁️ 公司營運中控台 (V23 全面自定義版)")
+st.set_page_config(page_title="雲端公司中控台", layout="wide", page_icon="🛡")
+st.title("☁️ 公司營運中控台 (V24 智能填補版)")
 
 sh = connect_google_sheet()
 if not sh: st.stop()
@@ -88,22 +80,18 @@ if len(raw_projs) > 1:
 else:
     df_projs = pd.DataFrame(columns=std_columns)
 
-# --- V23 讀取設定 (科目 & 歸屬) ---
+# --- 讀取設定 (科目 & 歸屬) ---
 raw_settings = ws_settings.get_all_values()
 cat_list = []
 attr_list = []
 
 if len(raw_settings) > 1:
-    # 讀取第一欄 (科目)
     cat_list = [row[0] for row in raw_settings[1:] if len(row) > 0 and row[0].strip() != ""]
-    # 讀取第二欄 (歸屬)
     attr_list = [row[1] for row in raw_settings[1:] if len(row) > 1 and row[1].strip() != ""]
 
-# 防呆預設值
 if not cat_list: cat_list = ["專案款", "薪資", "雜支"]
 if not attr_list: attr_list = ["公司固定開銷"]
 
-# 合併歸屬清單：【設定頁的固定歸屬】+【專案名稱】
 project_options = attr_list + (df_projs['name'].tolist() if not df_projs.empty else [])
 
 # --- 資料型態轉換 ---
@@ -119,7 +107,7 @@ if not df_projs.empty:
     df_projs['mid_date'] = pd.to_datetime(df_projs['mid_date'], errors='coerce')
 
 # ==========================================
-# 2. 戰情儀表板
+# 2. 戰情儀表板 (KPI)
 # ==========================================
 today = datetime.today()
 if not df_trans.empty:
@@ -259,13 +247,12 @@ with tab1:
                 st.success("更新成功"); st.rerun()
             except Exception as e: st.error(f"儲存失敗: {e}")
 
-# --- Tab 2: 記帳 (設定) ---
+# --- Tab 2: 記帳 (含設定) ---
 with tab2:
-    # 1. 設定管理區
     with st.expander("⚙️ 設定：管理【科目】與【固定歸屬】"):
         set_c1, set_c2 = st.columns(2)
         
-        # 左欄：科目管理
+        # V24: 智能填補 - 左欄科目
         with set_c1:
             st.markdown("##### 📂 科目管理")
             st.code("  ".join(cat_list), language=None)
@@ -273,29 +260,47 @@ with tab2:
             new_cat = c_add.text_input("新增科目名稱")
             if c_add.button("➕ 新增科目"):
                 if new_cat and new_cat not in cat_list:
-                    # 找到目前 Settings 表第一欄最後一個空位
-                    next_row = len(cat_list) + 2
-                    ws_settings.update_cell(next_row, 1, new_cat)
+                    # 1. 取得整欄資料 (含空洞)
+                    full_sheet = ws_settings.get_all_values()
+                    target_row = len(full_sheet) + 1 # 預設插在最後
+                    # 2. 尋找空洞 (從第2列開始，index 1)
+                    for i, row in enumerate(full_sheet):
+                        if i == 0: continue
+                        # 如果該列沒有資料，或第1欄是空的
+                        if len(row) < 1 or row[0].strip() == "":
+                            target_row = i + 1
+                            break
+                    
+                    ws_settings.update_cell(target_row, 1, new_cat)
                     st.success("已新增"); time.sleep(1); st.rerun()
             
             del_cat = c_del.selectbox("刪除科目", ["(選取)"] + cat_list)
             if c_del.button("🗑 刪除科目"):
                 if del_cat != "(選取)":
                     cell = ws_settings.find(del_cat)
-                    # 刪除時只清空該格，不要整列刪除以免影響右邊
-                    ws_settings.update_cell(cell.row, 1, "") 
+                    ws_settings.update_cell(cell.row, 1, "") # 只清空，不刪列
                     st.success("已刪除"); time.sleep(1); st.rerun()
 
-        # 右欄：歸屬管理 (V23 新增)
+        # V24: 智能填補 - 右欄歸屬
         with set_c2:
-            st.markdown("##### 🏢 固定歸屬管理 (非專案)")
+            st.markdown("##### 🏢 固定歸屬管理")
             st.code("  ".join(attr_list), language=None)
             a_add, a_del = st.columns(2)
             new_attr = a_add.text_input("新增歸屬名稱")
             if a_add.button("➕ 新增歸屬"):
                 if new_attr and new_attr not in attr_list:
-                    next_row = len(attr_list) + 2
-                    ws_settings.update_cell(next_row, 2, new_attr)
+                    # 1. 取得整欄資料
+                    full_sheet = ws_settings.get_all_values()
+                    target_row = len(full_sheet) + 1
+                    # 2. 尋找空洞
+                    for i, row in enumerate(full_sheet):
+                        if i == 0: continue
+                        # 如果該列長度小於2，或第2欄是空的
+                        if len(row) < 2 or row[1].strip() == "":
+                            target_row = i + 1
+                            break
+                            
+                    ws_settings.update_cell(target_row, 2, new_attr)
                     st.success("已新增"); time.sleep(1); st.rerun()
             
             del_attr = a_del.selectbox("刪除歸屬", ["(選取)"] + attr_list)
@@ -307,14 +312,12 @@ with tab2:
 
     st.divider()
 
-    # 2. 記帳區
     if 'form_type' not in st.session_state: st.session_state.form_type = "支出"
     if 'form_cat' not in st.session_state: st.session_state.form_cat = cat_list[0] if cat_list else ""
     if 'form_note' not in st.session_state: st.session_state.form_note = ""
     
     st.write("⚡️ **常用快速樣板**")
     t1, t2, t3 = st.columns(3)
-    # 這裡的邏輯也要改成讀取 cat_list，避免寫死
     if t1.button("🏢 房租"): st.session_state.form_type="支出"; st.session_state.form_cat="房租" if "房租" in cat_list else cat_list[0]; st.session_state.form_note=f"{datetime.now().month}月房租"; st.rerun()
     if t2.button("👥 薪資"): st.session_state.form_type="支出"; st.session_state.form_cat="薪資" if "薪資" in cat_list else cat_list[0]; st.session_state.form_note=f"{datetime.now().month}月薪資"; st.rerun()
     if t3.button("🔄 重置"): st.session_state.form_type="支出"; st.session_state.form_cat=cat_list[0] if cat_list else ""; st.session_state.form_note=""; st.rerun()
@@ -328,7 +331,7 @@ with tab2:
         ca = c3.selectbox("科目", cat_list, index=cat_list.index(st.session_state.form_cat) if st.session_state.form_cat in cat_list else 0)
         c4, c5 = st.columns(2)
         am = c4.number_input("金額", min_value=0)
-        pr = c5.selectbox("歸屬", project_options) # 這裡現在包含 固定歸屬 + 專案
+        pr = c5.selectbox("歸屬", project_options) 
         no = st.text_input("備註", value=st.session_state.form_note)
         if st.form_submit_button("寫入雲端"): 
             ws_trans.append_row([str(d), ty, ca, am, no, pr, str(datetime.now())])
