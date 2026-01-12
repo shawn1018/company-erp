@@ -106,8 +106,19 @@ if not df_projs.empty:
     df_projs['mid_date'] = pd.to_datetime(df_projs['mid_date'], errors='coerce')
 
 # ==========================================
-# 2. 戰情儀表板 (KPI)
+# 2. 戰情儀表板 (KPI) - V31 美化版
 # ==========================================
+# 輔助函式：數字美化 (1200 -> 1.2K)
+def fmt_num(num):
+    if num is None: return "$0"
+    abs_num = abs(num)
+    if abs_num >= 1_000_000:
+        return f"${num/1_000_000:.1f}M"
+    elif abs_num >= 1_000:
+        return f"${num/1_000:.1f}K"
+    else:
+        return f"${num:,.0f}"
+
 today = datetime.today()
 if not df_trans.empty:
     mask_month = (df_trans['date'].dt.year == today.year) & (df_trans['date'].dt.month == today.month)
@@ -119,11 +130,15 @@ if not df_trans.empty:
 else:
     m_income = m_expense = m_balance = total_balance = 0
 
+st.set_page_config(page_title="雲端公司中控台", layout="wide", page_icon="💲")
+st.title("☁️ 公司營運中控台 (V31 數字美化版)")
+
 col1, col2, col3, col4 = st.columns(4)
-col1.metric("📅 本月營收", f"${m_income:,.0f}")
-col2.metric("💸 本月開銷", f"${m_expense:,.0f}")
-col3.metric("💰 本月淨利", f"${m_balance:,.0f}")
-col4.metric("🏦 總資金水位", f"${total_balance:,.0f}")
+# 使用 fmt_num 函式來顯示 K/M 格式
+col1.metric("📅 本月營收", fmt_num(m_income))
+col2.metric("💸 本月開銷", fmt_num(m_expense))
+col3.metric("💰 本月淨利", fmt_num(m_balance))
+col4.metric("🏦 總資金水位", fmt_num(total_balance))
 st.divider()
 
 # ==========================================
@@ -181,7 +196,9 @@ if not df_trans.empty or not df_projs.empty:
             proj_income_sum = 0
             if not df_trans.empty:
                 proj_income_sum = df_trans[(df_trans['project_name'] == row['name']) & (df_trans['type'] == '收入')]['amount'].sum()
-            income_label = f"💰${proj_income_sum:,.0f}" if proj_income_sum > 0 else ""
+            
+            # 使用 fmt_num 美化圖表上的文字
+            income_label = f"💰{fmt_num(proj_income_sum)}" if proj_income_sum > 0 else ""
             mid_time_point = s + (e - s) / 2
 
             if pd.notnull(m) and s < m < e:
@@ -194,9 +211,11 @@ if not df_trans.empty or not df_projs.empty:
             if income_label:
                 fig.add_trace(go.Scatter(x=[mid_time_point], y=[row['name']], mode="text", text=[income_label], textposition="top center", textfont=dict(size=12, color="#333333"), showlegend=False, hoverinfo='skip'), row=2, col=1)
 
+    # --- V31 圖表刻度設定 ---
+    # .2s 是 Plotly 的 SI 格式 (例如 1500 -> 1.5k)
     fig.update_layout(height=700, barmode='group', legend=dict(orientation="h", y=1.1, x=0), 
-        yaxis=dict(title="單月收支", showgrid=True, gridcolor='lightgray', tickformat="s"),
-        yaxis2=dict(title="累計水位", overlaying='y', side='right', showgrid=False, zeroline=True, tickformat="s"), 
+        yaxis=dict(title="單月收支", showgrid=True, gridcolor='lightgray', tickformat=".2s"), 
+        yaxis2=dict(title="累計水位", overlaying='y', side='right', showgrid=False, zeroline=True, tickformat=".2s"), 
         yaxis3=dict(title="專案")
     )
     fig.update_xaxes(range=[min_date, max_date], tickformat="%Y-%m", dtick="M1", showgrid=True, gridwidth=1, gridcolor='rgba(211, 211, 211, 0.6)', griddash='dash', ticklabelmode="period")
@@ -217,7 +236,7 @@ def save_and_reload():
     time.sleep(1)
     st.rerun()
 
-# --- Tab 1: 專案管理 (含自動更名同步功能) ---
+# --- Tab 1: 專案管理 ---
 with tab1: 
     with st.expander("➕ 新增專案 (含驗收日)"):
         with st.form("add_proj"):
@@ -251,57 +270,35 @@ with tab1:
             try:
                 header_row = ws_projs.row_values(1)
                 if "mid_date" not in header_row: ws_projs.update_cell(1, len(header_row)+1, "mid_date"); header_row.append("mid_date")
-                
                 changes = st.session_state["proj_editor"]
-                deleted_indices = changes.get("deleted_rows", [])
-                edited_cells = changes.get("edited_rows", {})
-
-                # 1. 處理刪除
-                if deleted_indices:
-                    for r in sorted([i+2 for i in deleted_indices], reverse=True): ws_projs.delete_rows(r)
-                
-                # 2. 處理修改 (含連動更名)
-                if edited_cells:
+                if changes.get("deleted_rows"):
+                    for r in sorted([i+2 for i in changes["deleted_rows"]], reverse=True): ws_projs.delete_rows(r)
+                if changes.get("edited_rows"):
                     col_map = {name: i+1 for i, name in enumerate(header_row)}
-                    
-                    # 準備找出 Transactions 表中 project_name 欄位的位置
+                    # 準備連動更名
                     trans_header = ws_trans.row_values(1)
-                    try:
-                        trans_proj_col = trans_header.index("project_name") + 1
-                    except:
-                        trans_proj_col = -1 # 找不到就不更新交易表
+                    try: trans_proj_col = trans_header.index("project_name") + 1
+                    except: trans_proj_col = -1
 
-                    for idx_str, change_dict in edited_cells.items():
+                    for idx_str, change_dict in changes["edited_rows"].items():
                         idx = int(idx_str)
-                        if idx in deleted_indices: continue
+                        if idx in changes.get("deleted_rows", []): continue
                         
-                        sheet_row = idx + 2
-                        
-                        # --- V30 核心功能：連動更新交易紀錄 ---
-                        # 如果修改了 "name" (專案名稱)
+                        # 連動更名邏輯
                         if "name" in change_dict and trans_proj_col != -1:
                             new_name = change_dict["name"]
-                            # 找出舊名字 (從原始 df_projs 讀取)
                             old_name = df_projs.iloc[idx]['name']
-                            
                             if old_name != new_name and not pd.isna(old_name):
-                                # 搜尋交易表，把所有舊名字改成新名字
-                                # 為了效能，我們讀取整欄 project_name 下來比對
                                 trans_proj_list = ws_trans.col_values(trans_proj_col)
-                                
-                                # 遍歷尋找 (從 row 2 開始，因為 row 1 是標題)
                                 for r_idx, p_name in enumerate(trans_proj_list):
                                     if p_name == old_name:
-                                        # 寫入新名字 (r_idx + 1 是因為 list 是 0-based，sheet 是 1-based)
                                         ws_trans.update_cell(r_idx + 1, trans_proj_col, new_name)
-                                st.toast(f"已同步更新專案名稱：{old_name} -> {new_name}")
+                                st.toast(f"同步更新: {old_name} -> {new_name}")
 
-                        # 正常更新專案表
                         for col_name, val in change_dict.items():
                             if col_name in col_map:
                                 if isinstance(val, (date, datetime, pd.Timestamp)): val = val.strftime('%Y-%m-%d')
-                                ws_projs.update_cell(sheet_row, col_map[col_name], val)
-                
+                                ws_projs.update_cell(int(idx)+2, col_map[col_name], val)
                 save_and_reload()
             except Exception as e: st.error(f"儲存失敗: {e}")
 
@@ -391,7 +388,7 @@ with tab3:
             group_df = grouped.get_group(month).sort_values('date', ascending=False)
             m_inc = group_df[group_df['type']=='收入']['amount'].sum()
             m_exp = group_df[group_df['type']=='支出']['amount'].sum()
-            with st.expander(f"📅 {month} (共{len(group_df)}筆) | 🟢 +${m_inc:,.0f} | 🔴 -${m_exp:,.0f}"):
+            with st.expander(f"📅 {month} (共{len(group_df)}筆) | 🟢 +{fmt_num(m_inc)} | 🔴 -{fmt_num(m_exp)}"):
                 editor_key = f"editor_{month}"
                 st.data_editor(
                     group_df, key=editor_key, num_rows="dynamic", use_container_width=True,
@@ -457,6 +454,7 @@ with tab4:
             with chart1:
                 st.markdown("##### 📂 科目收支統計")
                 df_cat_group = df_stat.groupby(['category', 'type'])['amount'].sum().reset_index()
+                # 這裡也加上 text_auto='.2s'，讓統計圖表也顯示 1.5K
                 fig_cat = px.bar(df_cat_group, x='category', y='amount', color='type', barmode='group', color_discrete_map={'收入':'#00CC96', '支出':'#EF553B'}, text_auto='.2s', labels={'category': '科目', 'amount': '金額', 'type': '類型'})
                 st.plotly_chart(fig_cat, use_container_width=True)
 
