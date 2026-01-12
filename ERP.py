@@ -5,15 +5,11 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 import json
 import plotly.graph_objects as go
-import plotly.express as px
 from plotly.subplots import make_subplots
 import time
 
-st.set_page_config(page_title="雲端公司中控台", layout="wide", page_icon="📊")
-st.title("☁️ 公司營運中控台 (V27 統計報表版)")
-
 # ==========================================
-# 1. Google Sheets 連線與快取
+# 1. Google Sheets 連線設定
 # ==========================================
 SCOPE = ['https://www.googleapis.com/auth/spreadsheets',
          'https://www.googleapis.com/auth/drive']
@@ -153,7 +149,8 @@ if not df_trans.empty or not df_projs.empty:
     
     if all_dates:
         min_date = min(all_dates).replace(day=1) 
-        max_date = (max(all_dates) + timedelta(days=40)).replace(day=1)
+        max_date_raw = max(all_dates)
+        max_date = (max_date_raw + timedelta(days=40)).replace(day=1)
         full_date_range = pd.date_range(start=min_date, end=max_date, freq='MS')
     else:
         min_date = date.today(); max_date = date.today() + timedelta(days=90); full_date_range = pd.date_range(start=min_date, end=max_date, freq='MS')
@@ -176,17 +173,47 @@ if not df_trans.empty or not df_projs.empty:
     if not df_chart_projs.empty:
         color_map = {"進行中": "#00CC96", "暫停": "#FFA15A", "結案": "#AB63FA"}
         df_p_sorted = df_chart_projs.sort_values("start_date")
+        
         for i, row in df_p_sorted.iterrows():
             status_color = color_map.get(row['status'], "#888888")
             s = row['start_date']; e = row['end_date']; m = row['mid_date']
             s_str = s.strftime('%Y-%m-%d'); e_str = e.strftime('%Y-%m-%d'); m_str = m.strftime('%Y-%m-%d') if pd.notnull(m) else ""
 
+            # --- V28 新增：計算該專案總收入 ---
+            proj_income_sum = 0
+            if not df_trans.empty:
+                # 篩選該專案 + 類型為收入
+                proj_income_sum = df_trans[
+                    (df_trans['project_name'] == row['name']) & 
+                    (df_trans['type'] == '收入')
+                ]['amount'].sum()
+            
+            # 設定顯示文字 (如果有錢才顯示)
+            income_label = f"💰${proj_income_sum:,.0f}" if proj_income_sum > 0 else ""
+            
+            # 計算文字顯示位置 (時間軸中間)
+            mid_time_point = s + (e - s) / 2
+
+            # 畫橫條
             if pd.notnull(m) and s < m < e:
                 fig.add_trace(go.Scatter(x=[s, m], y=[row['name'], row['name']], mode="lines+markers", line=dict(color=status_color, width=20), marker=dict(symbol="line-ns", size=10, color="white"), name=row['name'], showlegend=False, hovertemplate=f"<b>{row['name']}</b><br>前期: {s_str}~{m_str}<extra></extra>"), row=2, col=1)
                 fig.add_trace(go.Scatter(x=[m, e], y=[row['name'], row['name']], mode="lines", line=dict(color=status_color, width=20), opacity=0.4, name=row['name'], showlegend=False, hovertemplate=f"<b>{row['name']}</b><br>後期: {m_str}~{e_str}<extra></extra>"), row=2, col=1)
                 fig.add_trace(go.Scatter(x=[m], y=[row['name']], mode="markers", marker=dict(symbol="diamond", size=12, color="gold", line=dict(width=1, color="black")), name="期中", showlegend=False, hovertemplate=f"🔸 期中驗收: {m_str}<extra></extra>"), row=2, col=1)
             else:
                 fig.add_trace(go.Scatter(x=[s, e], y=[row['name'], row['name']], mode="lines", line=dict(color=status_color, width=20), name=row['name'], showlegend=False, hovertemplate=f"<b>{row['name']}</b><br>{s_str}~{e_str}<extra></extra>"), row=2, col=1)
+
+            # --- V28 新增：畫上收入文字 ---
+            if income_label:
+                fig.add_trace(go.Scatter(
+                    x=[mid_time_point], 
+                    y=[row['name']],
+                    mode="text",
+                    text=[income_label],
+                    textposition="top center", # 顯示在橫條上方
+                    textfont=dict(size=12, color="#333333"),
+                    showlegend=False,
+                    hoverinfo='skip' # 滑鼠移上去不要擋住原本的資訊
+                ), row=2, col=1)
 
     fig.update_layout(height=700, barmode='group', legend=dict(orientation="h", y=1.1, x=0), 
         yaxis=dict(title="單月收支", showgrid=True, gridcolor='lightgray', tickformat="s"),
@@ -330,8 +357,7 @@ with tab2:
         no = st.text_input("備註", value=st.session_state.form_note)
         if st.form_submit_button("寫入雲端"): 
             ws_trans.append_row([str(d), ty, ca, am, no, pr, str(datetime.now())])
-            st.session_state.form_note=""
-            save_and_reload()
+            st.success("成功"); st.session_state.form_note=""; st.rerun()
 
 # --- Tab 3: 報表修改 ---
 with tab3:
@@ -391,71 +417,37 @@ with tab3:
             except Exception as e: st.error(f"儲存失敗: {e}")
     else: st.info("無帳務資料")
 
-# --- Tab 4: 統計報表 (V27 新增) ---
+# --- Tab 4: 統計報表 ---
 with tab4:
     st.subheader("📊 統計分析報表")
-    
     if not df_trans.empty:
-        # 1. 篩選器區塊
         with st.expander("🔎 篩選條件 (預設全選)", expanded=True):
             f1, f2 = st.columns(2)
-            
-            # 取得所有存在的科目和歸屬 (不重複)
             all_cats_in_data = df_trans['category'].unique().tolist()
             all_projs_in_data = df_trans['project_name'].unique().tolist()
-            
-            # 多選選單
             sel_cats = f1.multiselect("選擇科目", all_cats_in_data, default=all_cats_in_data)
             sel_projs = f2.multiselect("選擇歸屬", all_projs_in_data, default=all_projs_in_data)
         
-        # 2. 資料過濾
-        # 邏輯：只顯示「同時符合」科目和歸屬的資料
         mask = df_trans['category'].isin(sel_cats) & df_trans['project_name'].isin(sel_projs)
         df_stat = df_trans[mask]
         
         if not df_stat.empty:
-            # 3. 視覺化
             st.divider()
             chart1, chart2 = st.columns(2)
-            
-            # 圖表 A：科目收支統計
             with chart1:
                 st.markdown("##### 📂 科目收支統計")
-                # 依科目和類型加總
                 df_cat_group = df_stat.groupby(['category', 'type'])['amount'].sum().reset_index()
-                fig_cat = px.bar(
-                    df_cat_group, 
-                    x='category', y='amount', color='type', 
-                    barmode='group', # 並排顯示
-                    color_discrete_map={'收入':'#00CC96', '支出':'#EF553B'},
-                    text_auto='.2s',
-                    labels={'category': '科目', 'amount': '金額', 'type': '類型'}
-                )
+                fig_cat = px.bar(df_cat_group, x='category', y='amount', color='type', barmode='group', color_discrete_map={'收入':'#00CC96', '支出':'#EF553B'}, text_auto='.2s', labels={'category': '科目', 'amount': '金額', 'type': '類型'})
                 st.plotly_chart(fig_cat, use_container_width=True)
 
-            # 圖表 B：歸屬收支統計
             with chart2:
                 st.markdown("##### 🏢 歸屬收支統計 (分收入/支出)")
-                # 依歸屬和類型加總
                 df_proj_group = df_stat.groupby(['project_name', 'type'])['amount'].sum().reset_index()
-                fig_proj = px.bar(
-                    df_proj_group, 
-                    x='project_name', y='amount', color='type', 
-                    barmode='group', 
-                    color_discrete_map={'收入':'#00CC96', '支出':'#EF553B'},
-                    text_auto='.2s',
-                    labels={'project_name': '歸屬', 'amount': '金額', 'type': '類型'}
-                )
+                fig_proj = px.bar(df_proj_group, x='project_name', y='amount', color='type', barmode='group', color_discrete_map={'收入':'#00CC96', '支出':'#EF553B'}, text_auto='.2s', labels={'project_name': '歸屬', 'amount': '金額', 'type': '類型'})
                 st.plotly_chart(fig_proj, use_container_width=True)
             
-            # 4. 詳細數據表
             st.divider()
             with st.expander("📋 查看詳細篩選資料"):
-                st.dataframe(
-                    df_stat[['date', 'type', 'category', 'amount', 'project_name', 'note']].sort_values('date', ascending=False),
-                    use_container_width=True
-                )
-        else:
-            st.warning("⚠️ 篩選條件下無資料")
-    else:
-        st.info("尚無帳務資料可供統計")
+                st.dataframe(df_stat[['date', 'type', 'category', 'amount', 'project_name', 'note']].sort_values('date', ascending=False), use_container_width=True)
+        else: st.warning("⚠️ 篩選條件下無資料")
+    else: st.info("尚無帳務資料可供統計")
