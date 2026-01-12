@@ -8,12 +8,17 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import time
 
+st.set_page_config(page_title="雲端公司中控台", layout="wide", page_icon="🛡️")
+st.title("☁️ 公司營運中控台 (V26 防封鎖快取版)")
+
 # ==========================================
-# 1. Google Sheets 連線設定
+# 1. Google Sheets 連線設定 (加入快取)
 # ==========================================
 SCOPE = ['https://www.googleapis.com/auth/spreadsheets',
          'https://www.googleapis.com/auth/drive']
 
+# 使用 cache_resource 讓連線物件只建立一次
+@st.cache_resource
 def connect_google_sheet():
     try:
         if "google_key" in st.secrets:
@@ -28,6 +33,10 @@ def connect_google_sheet():
         st.error(f"連線失敗: {e}")
         return None
 
+sh = connect_google_sheet()
+if not sh: st.stop()
+
+# 初始化 Sheet 物件 (這個動作很快，可以不快取，或是也快取)
 def init_sheets(sheet):
     try:
         try: ws_trans = sheet.worksheet("Transactions")
@@ -51,46 +60,54 @@ def init_sheets(sheet):
         return ws_trans, ws_projs, ws_settings
     except: return None, None, None
 
-st.set_page_config(page_title="雲端公司中控台", layout="wide", page_icon="📉")
-st.title("☁️ 公司營運中控台 (V25 圖表刻度優化版)")
-
-sh = connect_google_sheet()
-if not sh: st.stop()
 ws_trans, ws_projs, ws_settings = init_sheets(sh)
 
 # ==========================================
-# 資料讀取
+# 資料讀取 (加入快取機制，大幅減少 API 呼叫)
 # ==========================================
-raw_trans = ws_trans.get_all_values()
-if len(raw_trans) > 1:
-    df_trans = pd.DataFrame(raw_trans[1:], columns=raw_trans[0])
-    df_trans['_sheet_row'] = range(2, len(df_trans) + 2)
-else:
-    df_trans = pd.DataFrame(columns=["date", "type", "category", "amount", "note", "project_name", "created_at", "_sheet_row"])
+# ttl=60 代表資料在記憶體存 60 秒，這期間重新整理網頁不會扣 Google 額度
+@st.cache_data(ttl=60)
+def load_data(_ws_trans, _ws_projs, _ws_settings):
+    # 1. Transactions
+    raw_trans = _ws_trans.get_all_values()
+    if len(raw_trans) > 1:
+        df_trans = pd.DataFrame(raw_trans[1:], columns=raw_trans[0])
+        df_trans['_sheet_row'] = range(2, len(df_trans) + 2)
+    else:
+        df_trans = pd.DataFrame(columns=["date", "type", "category", "amount", "note", "project_name", "created_at", "_sheet_row"])
 
-raw_projs = ws_projs.get_all_values()
-std_columns = ["name", "total_budget", "start_date", "status", "progress", "created_at", "end_date", "mid_date"]
-if len(raw_projs) > 1:
-    clean_data = []
-    for row in raw_projs[1:]:
-        while len(row) < 8: row.append("")
-        clean_data.append(row[:8])
-    df_projs = pd.DataFrame(clean_data, columns=std_columns)
-else:
-    df_projs = pd.DataFrame(columns=std_columns)
+    # 2. Projects
+    raw_projs = _ws_projs.get_all_values()
+    std_columns = ["name", "total_budget", "start_date", "status", "progress", "created_at", "end_date", "mid_date"]
+    if len(raw_projs) > 1:
+        clean_data = []
+        for row in raw_projs[1:]:
+            while len(row) < 8: row.append("")
+            clean_data.append(row[:8])
+        df_projs = pd.DataFrame(clean_data, columns=std_columns)
+    else:
+        df_projs = pd.DataFrame(columns=std_columns)
 
-# 讀取設定
-raw_settings = ws_settings.get_all_values()
-cat_list = []
-attr_list = []
-if len(raw_settings) > 1:
-    cat_list = [row[0] for row in raw_settings[1:] if len(row) > 0 and row[0].strip() != ""]
-    attr_list = [row[1] for row in raw_settings[1:] if len(row) > 1 and row[1].strip() != ""]
-if not cat_list: cat_list = ["專案款", "薪資", "雜支"]
-if not attr_list: attr_list = ["公司固定開銷"]
+    # 3. Settings
+    raw_settings = _ws_settings.get_all_values()
+    cat_list = []
+    attr_list = []
+    if len(raw_settings) > 1:
+        cat_list = [row[0] for row in raw_settings[1:] if len(row) > 0 and row[0].strip() != ""]
+        attr_list = [row[1] for row in raw_settings[1:] if len(row) > 1 and row[1].strip() != ""]
+    
+    if not cat_list: cat_list = ["專案款", "薪資", "雜支"]
+    if not attr_list: attr_list = ["公司固定開銷"]
+
+    return df_trans, df_projs, cat_list, attr_list
+
+# 呼叫快取函數讀取資料
+df_trans, df_projs, cat_list, attr_list = load_data(ws_trans, ws_projs, ws_settings)
+
+# 合併歸屬
 project_options = attr_list + (df_projs['name'].tolist() if not df_projs.empty else [])
 
-# 資料轉型
+# --- 資料型態轉換 ---
 if not df_trans.empty:
     df_trans['amount'] = pd.to_numeric(df_trans['amount'], errors='coerce').fillna(0)
     df_trans['date'] = pd.to_datetime(df_trans['date'], errors='coerce')
@@ -124,7 +141,7 @@ col4.metric("🏦 總資金水位", f"${total_balance:,.0f}")
 st.divider()
 
 # ==========================================
-# 全景圖 (V25 刻度優化版)
+# 全景圖
 # ==========================================
 if not df_trans.empty or not df_projs.empty:
     df_chart_projs = df_projs.copy()
@@ -182,44 +199,12 @@ if not df_trans.empty or not df_projs.empty:
             else:
                 fig.add_trace(go.Scatter(x=[s, e], y=[row['name'], row['name']], mode="lines", line=dict(color=status_color, width=20), name=row['name'], showlegend=False, hovertemplate=f"<b>{row['name']}</b><br>{s_str}~{e_str}<extra></extra>"), row=2, col=1)
 
-    # --- V25 優化 Layout 設定 ---
-    fig.update_layout(
-        height=700, 
-        barmode='group', 
-        legend=dict(orientation="h", y=1.1, x=0),
-        
-        # 左 Y 軸 (單月收支)：顯示格線
-        yaxis=dict(
-            title="單月收支", 
-            showgrid=True, 
-            gridcolor='lightgray',
-            tickformat="s" # 使用 SI 單位 (1k, 1M)
-        ),
-        
-        # 右 Y 軸 (累計水位)：【不顯示格線】，避免干擾，並強制對齊 0
-        yaxis2=dict(
-            title="累計水位", 
-            overlaying='y', 
-            side='right', 
-            showgrid=False, # 關鍵：關閉格線
-            zeroline=True,  # 顯示 0 線
-            tickformat="s"
-        ),
-        
-        # 下圖 Y 軸
-        yaxis3=dict(title="專案", showgrid=True)
+    fig.update_layout(height=700, barmode='group', legend=dict(orientation="h", y=1.1, x=0), 
+        yaxis=dict(title="單月收支", showgrid=True, gridcolor='lightgray', tickformat="s"),
+        yaxis2=dict(title="累計水位", overlaying='y', side='right', showgrid=False, zeroline=True, tickformat="s"), 
+        yaxis3=dict(title="專案")
     )
-    
-    fig.update_xaxes(
-        range=[min_date, max_date], 
-        tickformat="%Y-%m", 
-        dtick="M1", 
-        showgrid=True, 
-        gridwidth=1, 
-        gridcolor='rgba(211, 211, 211, 0.6)', 
-        griddash='dash', 
-        ticklabelmode="period"
-    )
+    fig.update_xaxes(range=[min_date, max_date], tickformat="%Y-%m", dtick="M1", showgrid=True, gridwidth=1, gridcolor='rgba(211, 211, 211, 0.6)', griddash='dash', ticklabelmode="period")
     st.plotly_chart(fig, use_container_width=True)
 else: st.info("💡 請輸入記帳與專案資料")
 
@@ -229,6 +214,13 @@ st.divider()
 # 3. 功能分頁
 # ==========================================
 tab1, tab2, tab3 = st.tabs(["🏗 專案管理", "✍️ 雲端記帳 (設定)", "📋 帳務總表"])
+
+# 輔助函式：寫入後清除快取並重整
+def save_and_reload():
+    st.cache_data.clear() # 清除快取，強制下次讀取最新資料
+    st.success("成功！資料已同步至雲端。")
+    time.sleep(1)
+    st.rerun()
 
 # --- Tab 1: 專案管理 ---
 with tab1: 
@@ -246,7 +238,7 @@ with tab1:
             if st.form_submit_button("新增"):
                 mid_str = str(p_mid) if p_mid else ""
                 ws_projs.append_row([p_name, p_budget, str(p_start), p_status, p_progress, str(datetime.now()), str(p_end), mid_str])
-                st.success("成功"); st.rerun()
+                save_and_reload()
 
     st.subheader("專案列表 (Excel 編輯模式)")
     if not df_projs.empty:
@@ -275,8 +267,7 @@ with tab1:
                             if col_name in col_map:
                                 if isinstance(val, (date, datetime, pd.Timestamp)): val = val.strftime('%Y-%m-%d')
                                 ws_projs.update_cell(int(idx)+2, col_map[col_name], val)
-                with st.spinner("同步中..."): time.sleep(1.5)
-                st.success("更新成功"); st.rerun()
+                save_and_reload()
             except Exception as e: st.error(f"儲存失敗: {e}")
 
 # --- Tab 2: 記帳 (含設定) ---
@@ -296,14 +287,14 @@ with tab2:
                         if i == 0: continue
                         if len(row) < 1 or row[0].strip() == "": target_row = i + 1; break
                     ws_settings.update_cell(target_row, 1, new_cat)
-                    st.success("已新增"); time.sleep(1); st.rerun()
+                    save_and_reload()
             
             del_cat = c_del.selectbox("刪除科目", ["(選取)"] + cat_list)
             if c_del.button("🗑 刪除科目"):
                 if del_cat != "(選取)":
                     cell = ws_settings.find(del_cat)
                     ws_settings.update_cell(cell.row, 1, "")
-                    st.success("已刪除"); time.sleep(1); st.rerun()
+                    save_and_reload()
 
         with set_c2:
             st.markdown("##### 🏢 固定歸屬管理")
@@ -318,19 +309,20 @@ with tab2:
                         if i == 0: continue
                         if len(row) < 2 or row[1].strip() == "": target_row = i + 1; break
                     ws_settings.update_cell(target_row, 2, new_attr)
-                    st.success("已新增"); time.sleep(1); st.rerun()
+                    save_and_reload()
             del_attr = a_del.selectbox("刪除歸屬", ["(選取)"] + attr_list)
             if a_del.button("🗑 刪除歸屬"):
                 if del_attr != "(選取)":
                     cell = ws_settings.find(del_attr)
                     ws_settings.update_cell(cell.row, 2, "")
-                    st.success("已刪除"); time.sleep(1); st.rerun()
+                    save_and_reload()
 
     st.divider()
 
     if 'form_type' not in st.session_state: st.session_state.form_type = "支出"
     if 'form_cat' not in st.session_state: st.session_state.form_cat = cat_list[0] if cat_list else ""
     if 'form_note' not in st.session_state: st.session_state.form_note = ""
+    
     st.write("⚡️ **常用快速樣板**")
     t1, t2, t3 = st.columns(3)
     if t1.button("🏢 房租"): st.session_state.form_type="支出"; st.session_state.form_cat="房租" if "房租" in cat_list else cat_list[0]; st.session_state.form_note=f"{datetime.now().month}月房租"; st.rerun()
@@ -349,7 +341,8 @@ with tab2:
         no = st.text_input("備註", value=st.session_state.form_note)
         if st.form_submit_button("寫入雲端"): 
             ws_trans.append_row([str(d), ty, ca, am, no, pr, str(datetime.now())])
-            st.success("成功"); st.session_state.form_note=""; st.rerun()
+            st.session_state.form_note=""
+            save_and_reload()
 
 # --- Tab 3: 報表修改 ---
 with tab3:
@@ -405,7 +398,6 @@ with tab3:
                 elif updates_to_perform:
                     for row, col, val in updates_to_perform: ws_trans.update_cell(row, col, val)
                     st.success("修改已儲存")
-                with st.spinner("同步中..."): time.sleep(1.5)
-                st.rerun()
+                save_and_reload()
             except Exception as e: st.error(f"儲存失敗: {e}")
     else: st.info("無帳務資料")
