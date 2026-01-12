@@ -5,7 +5,7 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 import json
 import plotly.graph_objects as go
-import plotly.express as px  # <---【關鍵修復】補上這行，統計報表就會正常了
+import plotly.express as px
 from plotly.subplots import make_subplots
 import time
 
@@ -178,7 +178,6 @@ if not df_trans.empty or not df_projs.empty:
             s = row['start_date']; e = row['end_date']; m = row['mid_date']
             s_str = s.strftime('%Y-%m-%d'); e_str = e.strftime('%Y-%m-%d'); m_str = m.strftime('%Y-%m-%d') if pd.notnull(m) else ""
 
-            # 計算該專案收入 (V28)
             proj_income_sum = 0
             if not df_trans.empty:
                 proj_income_sum = df_trans[(df_trans['project_name'] == row['name']) & (df_trans['type'] == '收入')]['amount'].sum()
@@ -218,7 +217,7 @@ def save_and_reload():
     time.sleep(1)
     st.rerun()
 
-# --- Tab 1: 專案管理 ---
+# --- Tab 1: 專案管理 (含自動更名同步功能) ---
 with tab1: 
     with st.expander("➕ 新增專案 (含驗收日)"):
         with st.form("add_proj"):
@@ -252,17 +251,57 @@ with tab1:
             try:
                 header_row = ws_projs.row_values(1)
                 if "mid_date" not in header_row: ws_projs.update_cell(1, len(header_row)+1, "mid_date"); header_row.append("mid_date")
+                
                 changes = st.session_state["proj_editor"]
-                if changes.get("deleted_rows"):
-                    for r in sorted([i+2 for i in changes["deleted_rows"]], reverse=True): ws_projs.delete_rows(r)
-                if changes.get("edited_rows"):
+                deleted_indices = changes.get("deleted_rows", [])
+                edited_cells = changes.get("edited_rows", {})
+
+                # 1. 處理刪除
+                if deleted_indices:
+                    for r in sorted([i+2 for i in deleted_indices], reverse=True): ws_projs.delete_rows(r)
+                
+                # 2. 處理修改 (含連動更名)
+                if edited_cells:
                     col_map = {name: i+1 for i, name in enumerate(header_row)}
-                    for idx, change_dict in changes["edited_rows"].items():
-                        if int(idx) in changes.get("deleted_rows", []): continue
+                    
+                    # 準備找出 Transactions 表中 project_name 欄位的位置
+                    trans_header = ws_trans.row_values(1)
+                    try:
+                        trans_proj_col = trans_header.index("project_name") + 1
+                    except:
+                        trans_proj_col = -1 # 找不到就不更新交易表
+
+                    for idx_str, change_dict in edited_cells.items():
+                        idx = int(idx_str)
+                        if idx in deleted_indices: continue
+                        
+                        sheet_row = idx + 2
+                        
+                        # --- V30 核心功能：連動更新交易紀錄 ---
+                        # 如果修改了 "name" (專案名稱)
+                        if "name" in change_dict and trans_proj_col != -1:
+                            new_name = change_dict["name"]
+                            # 找出舊名字 (從原始 df_projs 讀取)
+                            old_name = df_projs.iloc[idx]['name']
+                            
+                            if old_name != new_name and not pd.isna(old_name):
+                                # 搜尋交易表，把所有舊名字改成新名字
+                                # 為了效能，我們讀取整欄 project_name 下來比對
+                                trans_proj_list = ws_trans.col_values(trans_proj_col)
+                                
+                                # 遍歷尋找 (從 row 2 開始，因為 row 1 是標題)
+                                for r_idx, p_name in enumerate(trans_proj_list):
+                                    if p_name == old_name:
+                                        # 寫入新名字 (r_idx + 1 是因為 list 是 0-based，sheet 是 1-based)
+                                        ws_trans.update_cell(r_idx + 1, trans_proj_col, new_name)
+                                st.toast(f"已同步更新專案名稱：{old_name} -> {new_name}")
+
+                        # 正常更新專案表
                         for col_name, val in change_dict.items():
                             if col_name in col_map:
                                 if isinstance(val, (date, datetime, pd.Timestamp)): val = val.strftime('%Y-%m-%d')
-                                ws_projs.update_cell(int(idx)+2, col_map[col_name], val)
+                                ws_projs.update_cell(sheet_row, col_map[col_name], val)
+                
                 save_and_reload()
             except Exception as e: st.error(f"儲存失敗: {e}")
 
