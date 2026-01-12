@@ -44,7 +44,6 @@ def init_sheets(sheet):
         except:
             ws_settings = sheet.add_worksheet(title="Settings", rows=100, cols=5)
             ws_settings.append_row(["category_list", "attribution_list"])
-            # 預設值
             for i, cat in enumerate(["專案款", "薪資", "房租", "外包", "雜支"]):
                 ws_settings.update_cell(i+2, 1, cat)
             ws_settings.update_cell(2, 2, "公司固定開銷")
@@ -52,8 +51,8 @@ def init_sheets(sheet):
         return ws_trans, ws_projs, ws_settings
     except: return None, None, None
 
-st.set_page_config(page_title="雲端公司中控台", layout="wide", page_icon="🛡")
-st.title("☁️ 公司營運中控台 (V24 智能填補版)")
+st.set_page_config(page_title="雲端公司中控台", layout="wide", page_icon="📉")
+st.title("☁️ 公司營運中控台 (V25 圖表刻度優化版)")
 
 sh = connect_google_sheet()
 if not sh: st.stop()
@@ -80,21 +79,18 @@ if len(raw_projs) > 1:
 else:
     df_projs = pd.DataFrame(columns=std_columns)
 
-# --- 讀取設定 (科目 & 歸屬) ---
+# 讀取設定
 raw_settings = ws_settings.get_all_values()
 cat_list = []
 attr_list = []
-
 if len(raw_settings) > 1:
     cat_list = [row[0] for row in raw_settings[1:] if len(row) > 0 and row[0].strip() != ""]
     attr_list = [row[1] for row in raw_settings[1:] if len(row) > 1 and row[1].strip() != ""]
-
 if not cat_list: cat_list = ["專案款", "薪資", "雜支"]
 if not attr_list: attr_list = ["公司固定開銷"]
-
 project_options = attr_list + (df_projs['name'].tolist() if not df_projs.empty else [])
 
-# --- 資料型態轉換 ---
+# 資料轉型
 if not df_trans.empty:
     df_trans['amount'] = pd.to_numeric(df_trans['amount'], errors='coerce').fillna(0)
     df_trans['date'] = pd.to_datetime(df_trans['date'], errors='coerce')
@@ -128,7 +124,7 @@ col4.metric("🏦 總資金水位", f"${total_balance:,.0f}")
 st.divider()
 
 # ==========================================
-# 全景圖
+# 全景圖 (V25 刻度優化版)
 # ==========================================
 if not df_trans.empty or not df_projs.empty:
     df_chart_projs = df_projs.copy()
@@ -186,8 +182,44 @@ if not df_trans.empty or not df_projs.empty:
             else:
                 fig.add_trace(go.Scatter(x=[s, e], y=[row['name'], row['name']], mode="lines", line=dict(color=status_color, width=20), name=row['name'], showlegend=False, hovertemplate=f"<b>{row['name']}</b><br>{s_str}~{e_str}<extra></extra>"), row=2, col=1)
 
-    fig.update_layout(height=700, barmode='group', legend=dict(orientation="h", y=1.1, x=0), yaxis=dict(title="單月收支"), yaxis2=dict(title="累計水位", overlaying='y', side='right'), yaxis3=dict(title="專案"))
-    fig.update_xaxes(range=[min_date, max_date], tickformat="%Y-%m", dtick="M1", showgrid=True, gridwidth=1, gridcolor='rgba(211, 211, 211, 0.6)', griddash='dash', ticklabelmode="period")
+    # --- V25 優化 Layout 設定 ---
+    fig.update_layout(
+        height=700, 
+        barmode='group', 
+        legend=dict(orientation="h", y=1.1, x=0),
+        
+        # 左 Y 軸 (單月收支)：顯示格線
+        yaxis=dict(
+            title="單月收支", 
+            showgrid=True, 
+            gridcolor='lightgray',
+            tickformat="s" # 使用 SI 單位 (1k, 1M)
+        ),
+        
+        # 右 Y 軸 (累計水位)：【不顯示格線】，避免干擾，並強制對齊 0
+        yaxis2=dict(
+            title="累計水位", 
+            overlaying='y', 
+            side='right', 
+            showgrid=False, # 關鍵：關閉格線
+            zeroline=True,  # 顯示 0 線
+            tickformat="s"
+        ),
+        
+        # 下圖 Y 軸
+        yaxis3=dict(title="專案", showgrid=True)
+    )
+    
+    fig.update_xaxes(
+        range=[min_date, max_date], 
+        tickformat="%Y-%m", 
+        dtick="M1", 
+        showgrid=True, 
+        gridwidth=1, 
+        gridcolor='rgba(211, 211, 211, 0.6)', 
+        griddash='dash', 
+        ticklabelmode="period"
+    )
     st.plotly_chart(fig, use_container_width=True)
 else: st.info("💡 請輸入記帳與專案資料")
 
@@ -251,8 +283,6 @@ with tab1:
 with tab2:
     with st.expander("⚙️ 設定：管理【科目】與【固定歸屬】"):
         set_c1, set_c2 = st.columns(2)
-        
-        # V24: 智能填補 - 左欄科目
         with set_c1:
             st.markdown("##### 📂 科目管理")
             st.code("  ".join(cat_list), language=None)
@@ -260,17 +290,11 @@ with tab2:
             new_cat = c_add.text_input("新增科目名稱")
             if c_add.button("➕ 新增科目"):
                 if new_cat and new_cat not in cat_list:
-                    # 1. 取得整欄資料 (含空洞)
                     full_sheet = ws_settings.get_all_values()
-                    target_row = len(full_sheet) + 1 # 預設插在最後
-                    # 2. 尋找空洞 (從第2列開始，index 1)
+                    target_row = len(full_sheet) + 1
                     for i, row in enumerate(full_sheet):
                         if i == 0: continue
-                        # 如果該列沒有資料，或第1欄是空的
-                        if len(row) < 1 or row[0].strip() == "":
-                            target_row = i + 1
-                            break
-                    
+                        if len(row) < 1 or row[0].strip() == "": target_row = i + 1; break
                     ws_settings.update_cell(target_row, 1, new_cat)
                     st.success("已新增"); time.sleep(1); st.rerun()
             
@@ -278,10 +302,9 @@ with tab2:
             if c_del.button("🗑 刪除科目"):
                 if del_cat != "(選取)":
                     cell = ws_settings.find(del_cat)
-                    ws_settings.update_cell(cell.row, 1, "") # 只清空，不刪列
+                    ws_settings.update_cell(cell.row, 1, "")
                     st.success("已刪除"); time.sleep(1); st.rerun()
 
-        # V24: 智能填補 - 右欄歸屬
         with set_c2:
             st.markdown("##### 🏢 固定歸屬管理")
             st.code("  ".join(attr_list), language=None)
@@ -289,20 +312,13 @@ with tab2:
             new_attr = a_add.text_input("新增歸屬名稱")
             if a_add.button("➕ 新增歸屬"):
                 if new_attr and new_attr not in attr_list:
-                    # 1. 取得整欄資料
                     full_sheet = ws_settings.get_all_values()
                     target_row = len(full_sheet) + 1
-                    # 2. 尋找空洞
                     for i, row in enumerate(full_sheet):
                         if i == 0: continue
-                        # 如果該列長度小於2，或第2欄是空的
-                        if len(row) < 2 or row[1].strip() == "":
-                            target_row = i + 1
-                            break
-                            
+                        if len(row) < 2 or row[1].strip() == "": target_row = i + 1; break
                     ws_settings.update_cell(target_row, 2, new_attr)
                     st.success("已新增"); time.sleep(1); st.rerun()
-            
             del_attr = a_del.selectbox("刪除歸屬", ["(選取)"] + attr_list)
             if a_del.button("🗑 刪除歸屬"):
                 if del_attr != "(選取)":
@@ -315,13 +331,11 @@ with tab2:
     if 'form_type' not in st.session_state: st.session_state.form_type = "支出"
     if 'form_cat' not in st.session_state: st.session_state.form_cat = cat_list[0] if cat_list else ""
     if 'form_note' not in st.session_state: st.session_state.form_note = ""
-    
     st.write("⚡️ **常用快速樣板**")
     t1, t2, t3 = st.columns(3)
     if t1.button("🏢 房租"): st.session_state.form_type="支出"; st.session_state.form_cat="房租" if "房租" in cat_list else cat_list[0]; st.session_state.form_note=f"{datetime.now().month}月房租"; st.rerun()
     if t2.button("👥 薪資"): st.session_state.form_type="支出"; st.session_state.form_cat="薪資" if "薪資" in cat_list else cat_list[0]; st.session_state.form_note=f"{datetime.now().month}月薪資"; st.rerun()
     if t3.button("🔄 重置"): st.session_state.form_type="支出"; st.session_state.form_cat=cat_list[0] if cat_list else ""; st.session_state.form_note=""; st.rerun()
-    
     st.divider()
     
     with st.form("add_t"):
