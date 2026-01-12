@@ -5,19 +5,19 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 import json
 import plotly.graph_objects as go
+import plotly.express as px
 from plotly.subplots import make_subplots
 import time
 
-st.set_page_config(page_title="雲端公司中控台", layout="wide", page_icon="🛡️")
-st.title("☁️ 公司營運中控台 (V26 防封鎖快取版)")
+st.set_page_config(page_title="雲端公司中控台", layout="wide", page_icon="📊")
+st.title("☁️ 公司營運中控台 (V27 統計報表版)")
 
 # ==========================================
-# 1. Google Sheets 連線設定 (加入快取)
+# 1. Google Sheets 連線與快取
 # ==========================================
 SCOPE = ['https://www.googleapis.com/auth/spreadsheets',
          'https://www.googleapis.com/auth/drive']
 
-# 使用 cache_resource 讓連線物件只建立一次
 @st.cache_resource
 def connect_google_sheet():
     try:
@@ -36,7 +36,6 @@ def connect_google_sheet():
 sh = connect_google_sheet()
 if not sh: st.stop()
 
-# 初始化 Sheet 物件 (這個動作很快，可以不快取，或是也快取)
 def init_sheets(sheet):
     try:
         try: ws_trans = sheet.worksheet("Transactions")
@@ -62,13 +61,8 @@ def init_sheets(sheet):
 
 ws_trans, ws_projs, ws_settings = init_sheets(sh)
 
-# ==========================================
-# 資料讀取 (加入快取機制，大幅減少 API 呼叫)
-# ==========================================
-# ttl=60 代表資料在記憶體存 60 秒，這期間重新整理網頁不會扣 Google 額度
 @st.cache_data(ttl=60)
 def load_data(_ws_trans, _ws_projs, _ws_settings):
-    # 1. Transactions
     raw_trans = _ws_trans.get_all_values()
     if len(raw_trans) > 1:
         df_trans = pd.DataFrame(raw_trans[1:], columns=raw_trans[0])
@@ -76,7 +70,6 @@ def load_data(_ws_trans, _ws_projs, _ws_settings):
     else:
         df_trans = pd.DataFrame(columns=["date", "type", "category", "amount", "note", "project_name", "created_at", "_sheet_row"])
 
-    # 2. Projects
     raw_projs = _ws_projs.get_all_values()
     std_columns = ["name", "total_budget", "start_date", "status", "progress", "created_at", "end_date", "mid_date"]
     if len(raw_projs) > 1:
@@ -88,7 +81,6 @@ def load_data(_ws_trans, _ws_projs, _ws_settings):
     else:
         df_projs = pd.DataFrame(columns=std_columns)
 
-    # 3. Settings
     raw_settings = _ws_settings.get_all_values()
     cat_list = []
     attr_list = []
@@ -101,13 +93,10 @@ def load_data(_ws_trans, _ws_projs, _ws_settings):
 
     return df_trans, df_projs, cat_list, attr_list
 
-# 呼叫快取函數讀取資料
 df_trans, df_projs, cat_list, attr_list = load_data(ws_trans, ws_projs, ws_settings)
-
-# 合併歸屬
 project_options = attr_list + (df_projs['name'].tolist() if not df_projs.empty else [])
 
-# --- 資料型態轉換 ---
+# 資料轉型
 if not df_trans.empty:
     df_trans['amount'] = pd.to_numeric(df_trans['amount'], errors='coerce').fillna(0)
     df_trans['date'] = pd.to_datetime(df_trans['date'], errors='coerce')
@@ -213,11 +202,11 @@ st.divider()
 # ==========================================
 # 3. 功能分頁
 # ==========================================
-tab1, tab2, tab3 = st.tabs(["🏗 專案管理", "✍️ 雲端記帳 (設定)", "📋 帳務總表"])
+tab1, tab2, tab3, tab4 = st.tabs(["🏗 專案管理", "✍️ 雲端記帳", "📋 帳務總表", "📊 統計報表"])
 
-# 輔助函式：寫入後清除快取並重整
+# 輔助函式
 def save_and_reload():
-    st.cache_data.clear() # 清除快取，強制下次讀取最新資料
+    st.cache_data.clear()
     st.success("成功！資料已同步至雲端。")
     time.sleep(1)
     st.rerun()
@@ -401,3 +390,72 @@ with tab3:
                 save_and_reload()
             except Exception as e: st.error(f"儲存失敗: {e}")
     else: st.info("無帳務資料")
+
+# --- Tab 4: 統計報表 (V27 新增) ---
+with tab4:
+    st.subheader("📊 統計分析報表")
+    
+    if not df_trans.empty:
+        # 1. 篩選器區塊
+        with st.expander("🔎 篩選條件 (預設全選)", expanded=True):
+            f1, f2 = st.columns(2)
+            
+            # 取得所有存在的科目和歸屬 (不重複)
+            all_cats_in_data = df_trans['category'].unique().tolist()
+            all_projs_in_data = df_trans['project_name'].unique().tolist()
+            
+            # 多選選單
+            sel_cats = f1.multiselect("選擇科目", all_cats_in_data, default=all_cats_in_data)
+            sel_projs = f2.multiselect("選擇歸屬", all_projs_in_data, default=all_projs_in_data)
+        
+        # 2. 資料過濾
+        # 邏輯：只顯示「同時符合」科目和歸屬的資料
+        mask = df_trans['category'].isin(sel_cats) & df_trans['project_name'].isin(sel_projs)
+        df_stat = df_trans[mask]
+        
+        if not df_stat.empty:
+            # 3. 視覺化
+            st.divider()
+            chart1, chart2 = st.columns(2)
+            
+            # 圖表 A：科目收支統計
+            with chart1:
+                st.markdown("##### 📂 科目收支統計")
+                # 依科目和類型加總
+                df_cat_group = df_stat.groupby(['category', 'type'])['amount'].sum().reset_index()
+                fig_cat = px.bar(
+                    df_cat_group, 
+                    x='category', y='amount', color='type', 
+                    barmode='group', # 並排顯示
+                    color_discrete_map={'收入':'#00CC96', '支出':'#EF553B'},
+                    text_auto='.2s',
+                    labels={'category': '科目', 'amount': '金額', 'type': '類型'}
+                )
+                st.plotly_chart(fig_cat, use_container_width=True)
+
+            # 圖表 B：歸屬收支統計
+            with chart2:
+                st.markdown("##### 🏢 歸屬收支統計 (分收入/支出)")
+                # 依歸屬和類型加總
+                df_proj_group = df_stat.groupby(['project_name', 'type'])['amount'].sum().reset_index()
+                fig_proj = px.bar(
+                    df_proj_group, 
+                    x='project_name', y='amount', color='type', 
+                    barmode='group', 
+                    color_discrete_map={'收入':'#00CC96', '支出':'#EF553B'},
+                    text_auto='.2s',
+                    labels={'project_name': '歸屬', 'amount': '金額', 'type': '類型'}
+                )
+                st.plotly_chart(fig_proj, use_container_width=True)
+            
+            # 4. 詳細數據表
+            st.divider()
+            with st.expander("📋 查看詳細篩選資料"):
+                st.dataframe(
+                    df_stat[['date', 'type', 'category', 'amount', 'project_name', 'note']].sort_values('date', ascending=False),
+                    use_container_width=True
+                )
+        else:
+            st.warning("⚠️ 篩選條件下無資料")
+    else:
+        st.info("尚無帳務資料可供統計")
