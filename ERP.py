@@ -5,7 +5,7 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 import json
 import plotly.graph_objects as go
-import plotly.express as px  # <--- 【關鍵修復】補回這行，統計圖表才會正常
+import plotly.express as px
 from plotly.subplots import make_subplots
 import time
 
@@ -64,6 +64,7 @@ def load_data(_ws_trans, _ws_projs, _ws_settings):
     raw_trans = _ws_trans.get_all_values()
     if len(raw_trans) > 1:
         df_trans = pd.DataFrame(raw_trans[1:], columns=raw_trans[0])
+        # 【關鍵】加入原始列號，確保排序後修改能對應回正確位置
         df_trans['_sheet_row'] = range(2, len(df_trans) + 2)
     else:
         df_trans = pd.DataFrame(columns=["date", "type", "category", "amount", "note", "project_name", "created_at", "_sheet_row"])
@@ -133,7 +134,7 @@ else:
     m_income = m_expense = m_balance = total_balance = 0
 
 st.set_page_config(page_title="雲端公司中控台", layout="wide", page_icon="💲")
-st.title("☁️ 公司營運中控台 (V32.1 完整修復版)")
+st.title("☁️ 公司營運中控台 (V33 排序切換版)")
 
 col1, col2, col3, col4 = st.columns(4)
 col1.metric("📅 本月營收", fmt_num(m_income))
@@ -200,7 +201,6 @@ if not df_trans.empty or not df_projs.empty:
             
             income_label = f"💰{fmt_num(proj_income_sum)}" if proj_income_sum > 0 else ""
             budget_label = f"合約:{fmt_num(row['total_budget'])}" if row['total_budget'] > 0 else ""
-            
             mid_time_point = s + (e - s) / 2
 
             if pd.notnull(m) and s < m < e:
@@ -210,10 +210,8 @@ if not df_trans.empty or not df_projs.empty:
             else:
                 fig.add_trace(go.Scatter(x=[s, e], y=[row['name'], row['name']], mode="lines", line=dict(color=status_color, width=20), name=row['name'], showlegend=False, hovertemplate=f"<b>{row['name']}</b><br>{s_str}~{e_str}<extra></extra>"), row=2, col=1)
 
-            # 綠字：已收款
             if income_label:
                 fig.add_trace(go.Scatter(x=[mid_time_point], y=[row['name']], mode="text", text=[income_label], textposition="top center", textfont=dict(size=11, color="#006600"), showlegend=False, hoverinfo='skip'), row=2, col=1)
-            # 紅字：總預算
             if budget_label:
                 fig.add_trace(go.Scatter(x=[e], y=[row['name']], mode="text", text=[budget_label], textposition="middle right", textfont=dict(size=11, color="#CC0000"), showlegend=False, hoverinfo='skip'), row=2, col=1)
 
@@ -281,24 +279,19 @@ with tab1:
             try:
                 header_row = ws_projs.row_values(1)
                 if "mid_date" not in header_row: ws_projs.update_cell(1, len(header_row)+1, "mid_date"); header_row.append("mid_date")
-                
                 changes = st.session_state["proj_editor"]
                 if changes.get("deleted_rows"):
                     rows_to_del = [df_display.iloc[idx]['_sheet_row'] for idx in changes["deleted_rows"]]
                     for r in sorted(rows_to_del, reverse=True): ws_projs.delete_rows(r)
-                
                 if changes.get("edited_rows"):
                     col_map = {name: i+1 for i, name in enumerate(header_row)}
                     trans_header = ws_trans.row_values(1)
                     try: trans_proj_col = trans_header.index("project_name") + 1
                     except: trans_proj_col = -1
-
                     for idx_str, change_dict in changes["edited_rows"].items():
                         idx = int(idx_str)
                         if idx in changes.get("deleted_rows", []): continue
-                        
                         real_sheet_row = df_display.iloc[idx]['_sheet_row']
-                        
                         if "name" in change_dict and trans_proj_col != -1:
                             new_name = change_dict["name"]
                             old_name = df_display.iloc[idx]['name']
@@ -308,7 +301,6 @@ with tab1:
                                     if p_name == old_name:
                                         ws_trans.update_cell(r_idx + 1, trans_proj_col, new_name)
                                 st.toast(f"同步更新: {old_name} -> {new_name}")
-
                         for col_name, val in change_dict.items():
                             if col_name in col_map:
                                 if isinstance(val, (date, datetime, pd.Timestamp)): val = val.strftime('%Y-%m-%d')
@@ -334,7 +326,6 @@ with tab2:
                         if len(row) < 1 or row[0].strip() == "": target_row = i + 1; break
                     ws_settings.update_cell(target_row, 1, new_cat)
                     save_and_reload()
-            
             del_cat = c_del.selectbox("刪除科目", ["(選取)"] + cat_list)
             if c_del.button("🗑 刪除科目"):
                 if del_cat != "(選取)":
@@ -392,30 +383,61 @@ with tab2:
 
 # --- Tab 3: 報表修改 ---
 with tab3:
-    st.subheader("📋 帳務總表 (按月分組)")
+    st.subheader("📋 帳務總表 (可排序/分組)")
     if not df_trans.empty:
-        df_trans['YearMonth'] = df_trans['date'].dt.strftime('%Y-%m')
-        grouped = df_trans.groupby('YearMonth')
-        sorted_months = sorted(list(grouped.groups.keys()), reverse=True)
-        all_editors = {}
-        for month in sorted_months:
-            group_df = grouped.get_group(month).sort_values('date', ascending=False)
-            m_inc = group_df[group_df['type']=='收入']['amount'].sum()
-            m_exp = group_df[group_df['type']=='支出']['amount'].sum()
-            with st.expander(f"📅 {month} (共{len(group_df)}筆) | 🟢 +{fmt_num(m_inc)} | 🔴 -{fmt_num(m_exp)}"):
-                editor_key = f"editor_{month}"
-                st.data_editor(
-                    group_df, key=editor_key, num_rows="dynamic", use_container_width=True,
-                    column_config={
-                        "date": st.column_config.DateColumn("日期"), 
-                        "type": st.column_config.SelectboxColumn("類型", options=["支出", "收入"]), 
-                        "category": st.column_config.SelectboxColumn("科目", options=cat_list), 
-                        "amount": st.column_config.NumberColumn("金額", format="$%d"), 
-                        "project_name": st.column_config.SelectboxColumn("歸屬專案", options=project_options), 
-                        "note": "備註", "created_at": None, "_sheet_row": None
-                    }, hide_index=True
-                )
-                all_editors[month] = group_df
+        sort_col_t, spacer_t = st.columns([1, 2])
+        # V33 新增：帳務排序選單
+        sort_opt_t = sort_col_t.selectbox("🔃 排序方式", ["依日期 (月份分組) - 預設", "依金額 (大→小)", "依歸屬 (專案)", "依科目"], index=0)
+        
+        # 模式一：月份分組 (原本的樣子)
+        if sort_opt_t == "依日期 (月份分組) - 預設":
+            df_trans['YearMonth'] = df_trans['date'].dt.strftime('%Y-%m')
+            grouped = df_trans.groupby('YearMonth')
+            sorted_months = sorted(list(grouped.groups.keys()), reverse=True)
+            all_editors = {}
+            for month in sorted_months:
+                group_df = grouped.get_group(month).sort_values('date', ascending=False)
+                m_inc = group_df[group_df['type']=='收入']['amount'].sum()
+                m_exp = group_df[group_df['type']=='支出']['amount'].sum()
+                with st.expander(f"📅 {month} (共{len(group_df)}筆) | 🟢 +{fmt_num(m_inc)} | 🔴 -{fmt_num(m_exp)}"):
+                    editor_key = f"editor_{month}"
+                    st.data_editor(
+                        group_df, key=editor_key, num_rows="dynamic", use_container_width=True,
+                        column_config={
+                            "date": st.column_config.DateColumn("日期"), 
+                            "type": st.column_config.SelectboxColumn("類型", options=["支出", "收入"]), 
+                            "category": st.column_config.SelectboxColumn("科目", options=cat_list), 
+                            "amount": st.column_config.NumberColumn("金額", format="$%d"), 
+                            "project_name": st.column_config.SelectboxColumn("歸屬專案", options=project_options), 
+                            "note": "備註", "created_at": None, "_sheet_row": None, "YearMonth": None
+                        }, hide_index=True
+                    )
+                    all_editors[month] = group_df
+        
+        # 模式二：清單模式 (適合依金額、歸屬排序)
+        else:
+            if sort_opt_t == "依金額 (大→小)":
+                df_display_t = df_trans.sort_values("amount", ascending=False)
+            elif sort_opt_t == "依歸屬 (專案)":
+                df_display_t = df_trans.sort_values("project_name")
+            else: # 依科目
+                df_display_t = df_trans.sort_values("category")
+                
+            st.info("💡 此模式顯示所有資料，方便查找與比較。")
+            st.data_editor(
+                df_display_t, key="editor_all", num_rows="dynamic", use_container_width=True,
+                column_config={
+                    "date": st.column_config.DateColumn("日期"), 
+                    "type": st.column_config.SelectboxColumn("類型", options=["支出", "收入"]), 
+                    "category": st.column_config.SelectboxColumn("科目", options=cat_list), 
+                    "amount": st.column_config.NumberColumn("金額", format="$%d"), 
+                    "project_name": st.column_config.SelectboxColumn("歸屬專案", options=project_options), 
+                    "note": "備註", "created_at": None, "_sheet_row": None
+                }, hide_index=True
+            )
+            # 為了讓儲存邏輯通用，我們把這個單一 editor 放入字典
+            all_editors = {"all": df_display_t}
+
         st.divider()
         if st.button("💾 儲存所有帳務變更", type="primary"):
             try:
@@ -423,21 +445,31 @@ with tab3:
                 updates_to_perform = []
                 header_row_t = ws_trans.row_values(1)
                 col_map_t = {name: i+1 for i, name in enumerate(header_row_t)}
-                for month in sorted_months:
-                    editor_key = f"editor_{month}"
-                    changes = st.session_state.get(editor_key)
-                    if not changes: continue
-                    original_group_df = all_editors[month]
-                    for rel_idx in changes.get("deleted_rows", []):
-                        rows_to_delete.append(original_group_df.iloc[rel_idx]['_sheet_row'])
-                    for rel_idx_str, change_dict in changes.get("edited_rows", {}).items():
-                        rel_idx = int(rel_idx_str)
-                        if rel_idx in changes.get("deleted_rows", []): continue
-                        real_sheet_row = original_group_df.iloc[rel_idx]['_sheet_row']
-                        for col_name, new_val in change_dict.items():
-                            if col_name in col_map_t:
-                                if isinstance(new_val, (date, datetime, pd.Timestamp)): new_val = new_val.strftime('%Y-%m-%d')
-                                updates_to_perform.append((real_sheet_row, col_map_t[col_name], new_val))
+                
+                # 智慧儲存：同時支援「月份分組」和「清單模式」
+                # 我們遍歷 session_state 裡所有可能的 editor key
+                for key in st.session_state:
+                    if key.startswith("editor_"):
+                        changes = st.session_state[key]
+                        # 找出對應的原始 dataframe
+                        if sort_opt_t == "依日期 (月份分組) - 預設":
+                            month_key = key.replace("editor_", "")
+                            if month_key not in all_editors: continue
+                            original_df = all_editors[month_key]
+                        else:
+                            original_df = all_editors["all"]
+
+                        for rel_idx in changes.get("deleted_rows", []):
+                            rows_to_delete.append(original_df.iloc[rel_idx]['_sheet_row'])
+                        for rel_idx_str, change_dict in changes.get("edited_rows", {}).items():
+                            rel_idx = int(rel_idx_str)
+                            if rel_idx in changes.get("deleted_rows", []): continue
+                            real_sheet_row = original_group_df.iloc[rel_idx]['_sheet_row'] if sort_opt_t == "依日期 (月份分組) - 預設" else original_df.iloc[rel_idx]['_sheet_row']
+                            for col_name, new_val in change_dict.items():
+                                if col_name in col_map_t:
+                                    if isinstance(new_val, (date, datetime, pd.Timestamp)): new_val = new_val.strftime('%Y-%m-%d')
+                                    updates_to_perform.append((real_sheet_row, col_map_t[col_name], new_val))
+                
                 if rows_to_delete:
                     for r in sorted(list(set(rows_to_delete)), reverse=True): ws_trans.delete_rows(r)
                     st.warning("已執行刪除")
