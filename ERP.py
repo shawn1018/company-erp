@@ -5,6 +5,7 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 import json
 import plotly.graph_objects as go
+import plotly.express as px  # <--- 【關鍵修復】補回這行，統計圖表才會正常
 from plotly.subplots import make_subplots
 import time
 
@@ -76,7 +77,6 @@ def load_data(_ws_trans, _ws_projs, _ws_settings):
             while len(row) < 8: row.append("")
             clean_data.append(row[:8])
         df_projs = pd.DataFrame(clean_data, columns=std_columns)
-        # 【V32 關鍵】加入絕對列號，讓排序後也能正確存檔
         df_projs['_sheet_row'] = range(2, len(df_projs) + 2)
     else:
         df_projs = pd.DataFrame(columns=std_columns + ["_sheet_row"])
@@ -108,7 +108,6 @@ if not df_projs.empty:
     df_projs['start_date'] = pd.to_datetime(df_projs['start_date'], errors='coerce')
     df_projs['end_date'] = pd.to_datetime(df_projs['end_date'], errors='coerce')
     df_projs['mid_date'] = pd.to_datetime(df_projs['mid_date'], errors='coerce')
-    # 建立時間轉型以便排序
     df_projs['created_at'] = pd.to_datetime(df_projs['created_at'], errors='coerce')
 
 # 輔助函式：數字美化
@@ -134,7 +133,7 @@ else:
     m_income = m_expense = m_balance = total_balance = 0
 
 st.set_page_config(page_title="雲端公司中控台", layout="wide", page_icon="💲")
-st.title("☁️ 公司營運中控台 (V32 排序紅字版)")
+st.title("☁️ 公司營運中控台 (V32.1 完整修復版)")
 
 col1, col2, col3, col4 = st.columns(4)
 col1.metric("📅 本月營收", fmt_num(m_income))
@@ -200,7 +199,6 @@ if not df_trans.empty or not df_projs.empty:
                 proj_income_sum = df_trans[(df_trans['project_name'] == row['name']) & (df_trans['type'] == '收入')]['amount'].sum()
             
             income_label = f"💰{fmt_num(proj_income_sum)}" if proj_income_sum > 0 else ""
-            # V32 新增：預算標籤 (紅字)
             budget_label = f"合約:{fmt_num(row['total_budget'])}" if row['total_budget'] > 0 else ""
             
             mid_time_point = s + (e - s) / 2
@@ -212,11 +210,10 @@ if not df_trans.empty or not df_projs.empty:
             else:
                 fig.add_trace(go.Scatter(x=[s, e], y=[row['name'], row['name']], mode="lines", line=dict(color=status_color, width=20), name=row['name'], showlegend=False, hovertemplate=f"<b>{row['name']}</b><br>{s_str}~{e_str}<extra></extra>"), row=2, col=1)
 
-            # 顯示已收款 (綠字，中間)
+            # 綠字：已收款
             if income_label:
                 fig.add_trace(go.Scatter(x=[mid_time_point], y=[row['name']], mode="text", text=[income_label], textposition="top center", textfont=dict(size=11, color="#006600"), showlegend=False, hoverinfo='skip'), row=2, col=1)
-            
-            # V32 新增：顯示總預算 (紅字，右端)
+            # 紅字：總預算
             if budget_label:
                 fig.add_trace(go.Scatter(x=[e], y=[row['name']], mode="text", text=[budget_label], textposition="middle right", textfont=dict(size=11, color="#CC0000"), showlegend=False, hoverinfo='skip'), row=2, col=1)
 
@@ -260,21 +257,15 @@ with tab1:
                 ws_projs.append_row([p_name, p_budget, str(p_start), p_status, p_progress, str(datetime.now()), str(p_end), mid_str])
                 save_and_reload()
 
-    # --- V32 排序器 ---
     st.subheader("專案列表 (Excel 編輯模式)")
     if not df_projs.empty:
         sort_col, spacer = st.columns([1, 2])
         sort_opt = sort_col.selectbox("🔃 排序方式", ["依建立日期 (預設)", "依金額 (大→小)", "依狀態", "依專案名稱"], index=0)
         
-        # 建立排序後的視圖 (df_display)
-        if sort_opt == "依金額 (大→小)":
-            df_display = df_projs.sort_values("total_budget", ascending=False)
-        elif sort_opt == "依狀態":
-            df_display = df_projs.sort_values("status")
-        elif sort_opt == "依專案名稱":
-            df_display = df_projs.sort_values("name")
-        else: # 預設依建立日期
-            df_display = df_projs.sort_values("created_at", ascending=False)
+        if sort_opt == "依金額 (大→小)": df_display = df_projs.sort_values("total_budget", ascending=False)
+        elif sort_opt == "依狀態": df_display = df_projs.sort_values("status")
+        elif sort_opt == "依專案名稱": df_display = df_projs.sort_values("name")
+        else: df_display = df_projs.sort_values("created_at", ascending=False)
 
         edited_df = st.data_editor(
             df_display, key="proj_editor", num_rows="dynamic", use_container_width=True,
@@ -290,23 +281,14 @@ with tab1:
             try:
                 header_row = ws_projs.row_values(1)
                 if "mid_date" not in header_row: ws_projs.update_cell(1, len(header_row)+1, "mid_date"); header_row.append("mid_date")
+                
                 changes = st.session_state["proj_editor"]
-                
-                # V32 關鍵修改：使用 _sheet_row 追蹤真實列號
-                # 因為 df_display 是排序過的，index 跟 Google Sheet 不一樣
-                # 必須透過 df_display.iloc[idx]['_sheet_row'] 找回真身
-                
                 if changes.get("deleted_rows"):
-                    # 收集要刪除的真實列號
-                    rows_to_del = []
-                    for idx in changes["deleted_rows"]:
-                        rows_to_del.append(df_display.iloc[idx]['_sheet_row'])
-                    
+                    rows_to_del = [df_display.iloc[idx]['_sheet_row'] for idx in changes["deleted_rows"]]
                     for r in sorted(rows_to_del, reverse=True): ws_projs.delete_rows(r)
                 
                 if changes.get("edited_rows"):
                     col_map = {name: i+1 for i, name in enumerate(header_row)}
-                    # 準備連動更名
                     trans_header = ws_trans.row_values(1)
                     try: trans_proj_col = trans_header.index("project_name") + 1
                     except: trans_proj_col = -1
@@ -315,10 +297,8 @@ with tab1:
                         idx = int(idx_str)
                         if idx in changes.get("deleted_rows", []): continue
                         
-                        # 抓取真實列號
                         real_sheet_row = df_display.iloc[idx]['_sheet_row']
                         
-                        # 連動更名邏輯
                         if "name" in change_dict and trans_proj_col != -1:
                             new_name = change_dict["name"]
                             old_name = df_display.iloc[idx]['name']
