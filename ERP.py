@@ -131,23 +131,20 @@ if not df_trans.empty:
 else:
     m_income = m_expense = m_balance = total_balance = 0
 
-# 【V39 補回】計算所有專案預算總和
 if not df_projs.empty:
     total_contract_sum = df_projs['total_budget'].sum()
 else:
     total_contract_sum = 0
 
 st.set_page_config(page_title="雲端公司中控台", layout="wide", page_icon="💲")
-st.title("☁️ 公司營運中控台 (V39 全功能整合版)")
+st.title("☁️ 公司營運中控台 (V40 四色狀態版)")
 
-# 【V39 補回】改為 5 個欄位
 col1, col2, col3, col4, col5 = st.columns(5)
 col1.metric("📅 本月營收", fmt_num(m_income))
 col2.metric("💸 本月開銷", fmt_num(m_expense))
 col3.metric("💰 本月淨利", fmt_num(m_balance))
 col4.metric("🏦 總資金水位", fmt_num(total_balance))
-col5.metric("🏆 年度營業額", fmt_num(total_contract_sum), help="所有專案預算總和")
-
+col5.metric("🏆 年度營業額", fmt_num(total_contract_sum))
 st.divider()
 
 # ==========================================
@@ -195,7 +192,13 @@ if not df_trans.empty or not df_projs.empty:
         fig.add_trace(go.Scatter(x=monthly_stats.index, y=monthly_stats['Cumulative'], name='資金水位', mode='lines+markers', line=dict(color='#636EFA', width=3)), row=1, col=1, secondary_y=True)
 
     if not df_chart_projs.empty:
-        color_map = {"進行中": "#00CC96", "暫停": "#FFA15A", "結案": "#AB63FA"}
+        # 【V40】新增顏色對映
+        color_map = {
+            "進行中": "#00CC96", # 綠
+            "待尾款": "#4169E1", # 寶藍
+            "暫停": "#FFA15A",   # 橘
+            "結案": "#AB63FA"    # 紫
+        }
         df_p_sorted = df_chart_projs.sort_values("start_date")
         for i, row in df_p_sorted.iterrows():
             status_color = color_map.get(row['status'], "#888888")
@@ -229,6 +232,20 @@ if not df_trans.empty or not df_projs.empty:
     )
     fig.update_xaxes(range=[min_date, max_date], tickformat="%Y-%m", dtick="M1", showgrid=True, gridwidth=1, gridcolor='rgba(211, 211, 211, 0.6)', griddash='dash', ticklabelmode="period")
     st.plotly_chart(fig, use_container_width=True)
+    
+    # 【V40】新增甘特圖圖例說明
+    st.markdown(
+        """
+        <div style="display: flex; gap: 15px; font-size: 14px; margin-top: -15px; margin-bottom: 20px; justify-content: center; color: #555;">
+            <span><span style="color: #00CC96; font-size: 18px;">■</span> 進行中</span>
+            <span><span style="color: #4169E1; font-size: 18px;">■</span> 待尾款</span>
+            <span><span style="color: #FFA15A; font-size: 18px;">■</span> 暫停</span>
+            <span><span style="color: #AB63FA; font-size: 18px;">■</span> 結案</span>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
 else: st.info("💡 請輸入記帳與專案資料")
 
 st.divider()
@@ -251,7 +268,8 @@ with tab1:
             c1, c2, c3 = st.columns(3)
             p_name = c1.text_input("專案名稱")
             p_budget = c2.number_input("預算", min_value=0)
-            p_status = c3.selectbox("狀態", ["進行中", "結案", "暫停"])
+            # 【V40】新增待尾款選項
+            p_status = c3.selectbox("狀態", ["進行中", "待尾款", "結案", "暫停"])
             c4, c5, c6 = st.columns(3)
             p_start = c4.date_input("開始日期", date.today())
             p_mid = c5.date_input("🔸 期中驗收 (選填)", value=None)
@@ -272,7 +290,6 @@ with tab1:
         elif sort_opt == "依專案名稱": df_display = df_projs.sort_values("name")
         else: df_display = df_projs.sort_values("created_at", ascending=False)
 
-        # 計算實收與利潤比 (只顯示)
         if not df_trans.empty:
             expenses = df_trans[df_trans['type'] == '支出']
             proj_costs = expenses.groupby('project_name')['amount'].sum()
@@ -296,11 +313,10 @@ with tab1:
                 "name": "專案名稱", 
                 "total_budget": st.column_config.NumberColumn("預算", format="$%d"),
                 "real_income": st.column_config.NumberColumn("實收(含稅扣除)", format="$%d", disabled=True),
-                # 【V37】範圍改為 0-100
                 "profit_margin": st.column_config.ProgressColumn("利潤比", format="%.1f%%", min_value=-100, max_value=100),
-                # 【V37.1】進度改為 NumberColumn
                 "progress": st.column_config.NumberColumn("進度 (%)", format="%d%%", min_value=0, max_value=100, step=5),
-                "status": st.column_config.SelectboxColumn("狀態", options=["進行中", "結案", "暫停"]),
+                # 【V40】新增待尾款選項
+                "status": st.column_config.SelectboxColumn("狀態", options=["進行中", "待尾款", "結案", "暫停"]),
                 "start_date": st.column_config.DateColumn("開始日期"), "mid_date": st.column_config.DateColumn("🔸 期中驗收"), "end_date": st.column_config.DateColumn("結束日期"),
                 "created_at": None, "_sheet_row": None, "cost_sum": None 
             }, hide_index=True
@@ -311,7 +327,6 @@ with tab1:
                 if "mid_date" not in header_row: ws_projs.update_cell(1, len(header_row)+1, "mid_date"); header_row.append("mid_date")
                 changes = st.session_state["proj_editor"]
                 if changes.get("deleted_rows"):
-                    # 【V37.2】int() 修復
                     rows_to_del = [int(df_display.iloc[idx]['_sheet_row']) for idx in changes["deleted_rows"]]
                     for r in sorted(rows_to_del, reverse=True): ws_projs.delete_rows(r)
                 if changes.get("edited_rows"):
@@ -322,10 +337,7 @@ with tab1:
                     for idx_str, change_dict in changes["edited_rows"].items():
                         idx = int(idx_str)
                         if idx in changes.get("deleted_rows", []): continue
-                        
-                        # 【V37.2】int() 修復
                         real_sheet_row = int(df_display.iloc[idx]['_sheet_row'])
-                        
                         if "name" in change_dict and trans_proj_col != -1:
                             new_name = change_dict["name"]
                             old_name = df_display.iloc[idx]['name']
@@ -494,12 +506,10 @@ with tab3:
                             original_df = all_editors["all"]
 
                         for rel_idx in changes.get("deleted_rows", []):
-                            # 【V37.2】int() 修復
                             rows_to_delete.append(int(original_df.iloc[rel_idx]['_sheet_row']))
                         for rel_idx_str, change_dict in changes.get("edited_rows", {}).items():
                             rel_idx = int(rel_idx_str)
                             if rel_idx in changes.get("deleted_rows", []): continue
-                            # 【V37.2】int() 修復
                             real_sheet_row = int(original_df.iloc[rel_idx]['_sheet_row'])
                             for col_name, new_val in change_dict.items():
                                 if col_name in col_map_t:
