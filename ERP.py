@@ -132,7 +132,7 @@ else:
     m_income = m_expense = m_balance = total_balance = 0
 
 st.set_page_config(page_title="雲端公司中控台", layout="wide", page_icon="💲")
-st.title("☁️ 公司營運中控台 (V35 真實獲利版)")
+st.title("☁️ 公司營運中控台 (V35.1 完整修復版)")
 
 col1, col2, col3, col4 = st.columns(4)
 col1.metric("📅 本月營收", fmt_num(m_income))
@@ -263,29 +263,21 @@ with tab1:
         elif sort_opt == "依專案名稱": df_display = df_projs.sort_values("name")
         else: df_display = df_projs.sort_values("created_at", ascending=False)
 
-        # --- V35: 計算實收與利潤比 (只顯示，不存入資料庫) ---
-        # 1. 計算每個專案的總支出 (專案款)
+        # 計算實收與利潤比 (只顯示)
         if not df_trans.empty:
             expenses = df_trans[df_trans['type'] == '支出']
             proj_costs = expenses.groupby('project_name')['amount'].sum()
-            # 將支出對應到專案列表
             df_display['cost_sum'] = df_display['name'].map(proj_costs).fillna(0)
         else:
             df_display['cost_sum'] = 0
 
-        # 2. 計算實收 = 預算 - (預算*5%稅) - 專案相關支出
         df_display['real_income'] = (df_display['total_budget'] * 0.95) - df_display['cost_sum']
-
-        # 3. 計算利潤比 = 實收 / 預算
-        # 避免除以零
         df_display['profit_margin'] = df_display.apply(
             lambda x: x['real_income'] / x['total_budget'] if x['total_budget'] > 0 else 0, 
             axis=1
         )
 
-        # 4. 重新排列欄位順序，把新欄位插在預算後面
         cols = ['name', 'total_budget', 'real_income', 'profit_margin', 'status', 'progress', 'start_date', 'mid_date', 'end_date', 'created_at', '_sheet_row']
-        # 確保這些欄位都存在 (防呆)
         existing_cols = [c for c in cols if c in df_display.columns]
         df_display = df_display[existing_cols]
 
@@ -294,38 +286,33 @@ with tab1:
             column_config={
                 "name": "專案名稱", 
                 "total_budget": st.column_config.NumberColumn("預算", format="$%d"),
-                # V35 新增欄位設定 (設定為 Disabled 唯讀)
                 "real_income": st.column_config.NumberColumn("實收(含稅扣除)", format="$%d", disabled=True),
-                "profit_margin": st.column_config.ProgressColumn("利潤比", format="%.1f%%", min_value=-1, max_value=1, disabled=True),
+                # 【修正點】ProgressColumn 不支援 disabled 參數，移除它即可 (預設就是唯讀)
+                "profit_margin": st.column_config.ProgressColumn("利潤比", format="%.1f%%", min_value=-1, max_value=1),
                 
                 "status": st.column_config.SelectboxColumn("狀態", options=["進行中", "結案", "暫停"]),
                 "progress": st.column_config.ProgressColumn("進度", format="%d%%", min_value=0, max_value=100),
                 "start_date": st.column_config.DateColumn("開始日期"), "mid_date": st.column_config.DateColumn("🔸 期中驗收"), "end_date": st.column_config.DateColumn("結束日期"),
-                "created_at": None, "_sheet_row": None, "cost_sum": None # 隱藏計算中間值
+                "created_at": None, "_sheet_row": None, "cost_sum": None 
             }, hide_index=True
         )
         if st.button("💾 儲存專案變更"):
             try:
                 header_row = ws_projs.row_values(1)
                 if "mid_date" not in header_row: ws_projs.update_cell(1, len(header_row)+1, "mid_date"); header_row.append("mid_date")
-                
                 changes = st.session_state["proj_editor"]
                 if changes.get("deleted_rows"):
                     rows_to_del = [df_display.iloc[idx]['_sheet_row'] for idx in changes["deleted_rows"]]
                     for r in sorted(rows_to_del, reverse=True): ws_projs.delete_rows(r)
-                
                 if changes.get("edited_rows"):
                     col_map = {name: i+1 for i, name in enumerate(header_row)}
                     trans_header = ws_trans.row_values(1)
                     try: trans_proj_col = trans_header.index("project_name") + 1
                     except: trans_proj_col = -1
-
                     for idx_str, change_dict in changes["edited_rows"].items():
                         idx = int(idx_str)
                         if idx in changes.get("deleted_rows", []): continue
-                        
                         real_sheet_row = df_display.iloc[idx]['_sheet_row']
-                        
                         if "name" in change_dict and trans_proj_col != -1:
                             new_name = change_dict["name"]
                             old_name = df_display.iloc[idx]['name']
@@ -335,7 +322,6 @@ with tab1:
                                     if p_name == old_name:
                                         ws_trans.update_cell(r_idx + 1, trans_proj_col, new_name)
                                 st.toast(f"同步更新: {old_name} -> {new_name}")
-
                         for col_name, val in change_dict.items():
                             if col_name in col_map:
                                 if isinstance(val, (date, datetime, pd.Timestamp)): val = val.strftime('%Y-%m-%d')
