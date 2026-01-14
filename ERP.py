@@ -131,14 +131,23 @@ if not df_trans.empty:
 else:
     m_income = m_expense = m_balance = total_balance = 0
 
-st.set_page_config(page_title="雲端公司中控台", layout="wide", page_icon="💲")
-st.title("☁️ 公司營運中控台 (V37.2 刪除修復版)")
+# 【V39 補回】計算所有專案預算總和
+if not df_projs.empty:
+    total_contract_sum = df_projs['total_budget'].sum()
+else:
+    total_contract_sum = 0
 
-col1, col2, col3, col4 = st.columns(4)
+st.set_page_config(page_title="雲端公司中控台", layout="wide", page_icon="💲")
+st.title("☁️ 公司營運中控台 (V39 全功能整合版)")
+
+# 【V39 補回】改為 5 個欄位
+col1, col2, col3, col4, col5 = st.columns(5)
 col1.metric("📅 本月營收", fmt_num(m_income))
 col2.metric("💸 本月開銷", fmt_num(m_expense))
 col3.metric("💰 本月淨利", fmt_num(m_balance))
 col4.metric("🏦 總資金水位", fmt_num(total_balance))
+col5.metric("🏆 年度營業額", fmt_num(total_contract_sum), help="所有專案預算總和")
+
 st.divider()
 
 # ==========================================
@@ -287,7 +296,9 @@ with tab1:
                 "name": "專案名稱", 
                 "total_budget": st.column_config.NumberColumn("預算", format="$%d"),
                 "real_income": st.column_config.NumberColumn("實收(含稅扣除)", format="$%d", disabled=True),
+                # 【V37】範圍改為 0-100
                 "profit_margin": st.column_config.ProgressColumn("利潤比", format="%.1f%%", min_value=-100, max_value=100),
+                # 【V37.1】進度改為 NumberColumn
                 "progress": st.column_config.NumberColumn("進度 (%)", format="%d%%", min_value=0, max_value=100, step=5),
                 "status": st.column_config.SelectboxColumn("狀態", options=["進行中", "結案", "暫停"]),
                 "start_date": st.column_config.DateColumn("開始日期"), "mid_date": st.column_config.DateColumn("🔸 期中驗收"), "end_date": st.column_config.DateColumn("結束日期"),
@@ -300,7 +311,7 @@ with tab1:
                 if "mid_date" not in header_row: ws_projs.update_cell(1, len(header_row)+1, "mid_date"); header_row.append("mid_date")
                 changes = st.session_state["proj_editor"]
                 if changes.get("deleted_rows"):
-                    # 【關鍵修復】使用 int() 強制轉型，解決 int64 not JSON serializable 問題
+                    # 【V37.2】int() 修復
                     rows_to_del = [int(df_display.iloc[idx]['_sheet_row']) for idx in changes["deleted_rows"]]
                     for r in sorted(rows_to_del, reverse=True): ws_projs.delete_rows(r)
                 if changes.get("edited_rows"):
@@ -312,7 +323,7 @@ with tab1:
                         idx = int(idx_str)
                         if idx in changes.get("deleted_rows", []): continue
                         
-                        # 【關鍵修復】同樣使用 int() 轉型
+                        # 【V37.2】int() 修復
                         real_sheet_row = int(df_display.iloc[idx]['_sheet_row'])
                         
                         if "name" in change_dict and trans_proj_col != -1:
@@ -483,18 +494,17 @@ with tab3:
                             original_df = all_editors["all"]
 
                         for rel_idx in changes.get("deleted_rows", []):
-                            # 【關鍵修復】這裡也加上 int()
+                            # 【V37.2】int() 修復
                             rows_to_delete.append(int(original_df.iloc[rel_idx]['_sheet_row']))
                         for rel_idx_str, change_dict in changes.get("edited_rows", {}).items():
                             rel_idx = int(rel_idx_str)
                             if rel_idx in changes.get("deleted_rows", []): continue
-                            # 【關鍵修復】這裡也加上 int()
+                            # 【V37.2】int() 修復
                             real_sheet_row = int(original_df.iloc[rel_idx]['_sheet_row'])
                             for col_name, new_val in change_dict.items():
                                 if col_name in col_map_t:
                                     if isinstance(new_val, (date, datetime, pd.Timestamp)): new_val = new_val.strftime('%Y-%m-%d')
                                     updates_to_perform.append((real_sheet_row, col_map_t[col_name], new_val))
-                
                 if rows_to_delete:
                     for r in sorted(list(set(rows_to_delete)), reverse=True): ws_trans.delete_rows(r)
                     st.warning("已執行刪除")
