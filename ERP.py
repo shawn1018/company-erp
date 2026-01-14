@@ -97,18 +97,10 @@ def load_data(_ws_trans, _ws_projs, _ws_settings):
 df_trans, df_projs, cat_list, attr_list = load_data(ws_trans, ws_projs, ws_settings)
 project_options = attr_list + (df_projs['name'].tolist() if not df_projs.empty else [])
 
-# 資料轉型與清洗
+# 資料轉型
 if not df_trans.empty:
     df_trans['amount'] = pd.to_numeric(df_trans['amount'], errors='coerce').fillna(0)
     df_trans['date'] = pd.to_datetime(df_trans['date'], errors='coerce')
-
-# 【V41】狀態對應表 (舊資料自動轉新資料)
-status_mapping = {
-    "進行中": "🟢 進行中",
-    "暫停": "🟠 暫停",
-    "結案": "🔘 結案",
-    "待尾款": "🔴 待尾款"
-}
 
 if not df_projs.empty:
     df_projs['total_budget'] = pd.to_numeric(df_projs['total_budget'], errors='coerce').fillna(0)
@@ -118,7 +110,8 @@ if not df_projs.empty:
     df_projs['mid_date'] = pd.to_datetime(df_projs['mid_date'], errors='coerce')
     df_projs['created_at'] = pd.to_datetime(df_projs['created_at'], errors='coerce')
     
-    # 【V41】自動清洗狀態欄位：如果發現是舊文字，自動加上燈號
+    # 狀態清洗
+    status_mapping = {"進行中": "🟢 進行中", "暫停": "🟠 暫停", "結案": "🔘 結案", "待尾款": "🔴 待尾款"}
     df_projs['status'] = df_projs['status'].apply(lambda x: status_mapping.get(x, x))
 
 def fmt_num(num):
@@ -142,20 +135,37 @@ if not df_trans.empty:
 else:
     m_income = m_expense = m_balance = total_balance = 0
 
+# 【V42】計算營業額與實收
 if not df_projs.empty:
-    total_contract_sum = df_projs['total_budget'].sum()
+    total_budget_sum = df_projs['total_budget'].sum()
+    
+    # 計算實收總和 (預算*0.95 - 專案成本)
+    # 1. 先把專案成本算出來
+    df_projs_calc = df_projs.copy()
+    if not df_trans.empty:
+        expenses = df_trans[df_trans['type'] == '支出']
+        proj_costs = expenses.groupby('project_name')['amount'].sum()
+        df_projs_calc['cost'] = df_projs_calc['name'].map(proj_costs).fillna(0)
+    else:
+        df_projs_calc['cost'] = 0
+    
+    # 2. 實收公式
+    total_real_income_sum = ((df_projs_calc['total_budget'] * 0.95) - df_projs_calc['cost']).sum()
 else:
-    total_contract_sum = 0
+    total_budget_sum = 0
+    total_real_income_sum = 0
 
 st.set_page_config(page_title="雲端公司中控台", layout="wide", page_icon="🚥")
-st.title("☁️ 公司營運中控台 (V41 色彩管理版)")
+st.title("☁️ 公司營運中控台 (V42 雙重指標版)")
 
 col1, col2, col3, col4, col5 = st.columns(5)
 col1.metric("📅 本月營收", fmt_num(m_income))
 col2.metric("💸 本月開銷", fmt_num(m_expense))
 col3.metric("💰 本月淨利", fmt_num(m_balance))
 col4.metric("🏦 總資金水位", fmt_num(total_balance))
-col5.metric("🏆 年度營業額", fmt_num(total_contract_sum))
+# 【V42】雙重指標顯示
+col5.metric("🏆 年度營業額 / 實收", f"{fmt_num(total_budget_sum)} / {fmt_num(total_real_income_sum)}")
+
 st.divider()
 
 # ==========================================
@@ -203,24 +213,19 @@ if not df_trans.empty or not df_projs.empty:
         fig.add_trace(go.Scatter(x=monthly_stats.index, y=monthly_stats['Cumulative'], name='資金水位', mode='lines+markers', line=dict(color='#636EFA', width=3)), row=1, col=1, secondary_y=True)
 
     if not df_chart_projs.empty:
-        # 【V41】更新顏色對照表 (依照您的指定)
         color_map = {
-            "🟢 進行中": "#00CC96", # 綠色
-            "🔴 待尾款": "#EF553B", # 紅色 (您要求的)
-            "🟠 暫停": "#FFA15A",   # 橘色
-            "🔘 結案": "#B0B0B0"    # 灰色 (您要求的)
-        }
-        
-        # 相容舊資料 (沒有燈號的)
-        color_map_fallback = {
+            "🟢 進行中": "#00CC96", 
+            "🔴 待尾款": "#EF553B", 
+            "🟠 暫停": "#FFA15A",   
+            "🔘 結案": "#B0B0B0",
+            # Fallback
             "進行中": "#00CC96", "待尾款": "#EF553B", "暫停": "#FFA15A", "結案": "#B0B0B0"
         }
         
         df_p_sorted = df_chart_projs.sort_values("start_date")
         for i, row in df_p_sorted.iterrows():
             status_val = row['status']
-            # 先找有燈號的，找不到找沒燈號的，再找不到就給預設灰
-            status_color = color_map.get(status_val, color_map_fallback.get(status_val, "#888888"))
+            status_color = color_map.get(status_val, "#888888")
             
             s = row['start_date']; e = row['end_date']; m = row['mid_date']
             s_str = s.strftime('%Y-%m-%d'); e_str = e.strftime('%Y-%m-%d'); m_str = m.strftime('%Y-%m-%d') if pd.notnull(m) else ""
@@ -253,7 +258,6 @@ if not df_trans.empty or not df_projs.empty:
     fig.update_xaxes(range=[min_date, max_date], tickformat="%Y-%m", dtick="M1", showgrid=True, gridwidth=1, gridcolor='rgba(211, 211, 211, 0.6)', griddash='dash', ticklabelmode="period")
     st.plotly_chart(fig, use_container_width=True)
     
-    # 【V41】更新下方圖例
     st.markdown(
         """
         <div style="display: flex; gap: 15px; font-size: 14px; margin-top: -15px; margin-bottom: 20px; justify-content: center; color: #555;">
@@ -288,7 +292,6 @@ with tab1:
             c1, c2, c3 = st.columns(3)
             p_name = c1.text_input("專案名稱")
             p_budget = c2.number_input("預算", min_value=0)
-            # 【V41】新增時預設帶入燈號
             p_status = c3.selectbox("狀態", ["🟢 進行中", "🔴 待尾款", "🔘 結案", "🟠 暫停"])
             c4, c5, c6 = st.columns(3)
             p_start = c4.date_input("開始日期", date.today())
@@ -335,10 +338,7 @@ with tab1:
                 "real_income": st.column_config.NumberColumn("實收(含稅扣除)", format="$%d", disabled=True),
                 "profit_margin": st.column_config.ProgressColumn("利潤比", format="%.1f%%", min_value=-100, max_value=100),
                 "progress": st.column_config.NumberColumn("進度 (%)", format="%d%%", min_value=0, max_value=100, step=5),
-                
-                # 【V41】選單選項更新
                 "status": st.column_config.SelectboxColumn("狀態", options=["🟢 進行中", "🔴 待尾款", "🔘 結案", "🟠 暫停"]),
-                
                 "start_date": st.column_config.DateColumn("開始日期"), "mid_date": st.column_config.DateColumn("🔸 期中驗收"), "end_date": st.column_config.DateColumn("結束日期"),
                 "created_at": None, "_sheet_row": None, "cost_sum": None 
             }, hide_index=True
