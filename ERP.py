@@ -132,7 +132,7 @@ else:
     m_income = m_expense = m_balance = total_balance = 0
 
 st.set_page_config(page_title="雲端公司中控台", layout="wide", page_icon="💲")
-st.title("☁️ 公司營運中控台 (V34 分組內排序版)")
+st.title("☁️ 公司營運中控台 (V35 真實獲利版)")
 
 col1, col2, col3, col4 = st.columns(4)
 col1.metric("📅 本月營收", fmt_num(m_income))
@@ -263,14 +263,45 @@ with tab1:
         elif sort_opt == "依專案名稱": df_display = df_projs.sort_values("name")
         else: df_display = df_projs.sort_values("created_at", ascending=False)
 
+        # --- V35: 計算實收與利潤比 (只顯示，不存入資料庫) ---
+        # 1. 計算每個專案的總支出 (專案款)
+        if not df_trans.empty:
+            expenses = df_trans[df_trans['type'] == '支出']
+            proj_costs = expenses.groupby('project_name')['amount'].sum()
+            # 將支出對應到專案列表
+            df_display['cost_sum'] = df_display['name'].map(proj_costs).fillna(0)
+        else:
+            df_display['cost_sum'] = 0
+
+        # 2. 計算實收 = 預算 - (預算*5%稅) - 專案相關支出
+        df_display['real_income'] = (df_display['total_budget'] * 0.95) - df_display['cost_sum']
+
+        # 3. 計算利潤比 = 實收 / 預算
+        # 避免除以零
+        df_display['profit_margin'] = df_display.apply(
+            lambda x: x['real_income'] / x['total_budget'] if x['total_budget'] > 0 else 0, 
+            axis=1
+        )
+
+        # 4. 重新排列欄位順序，把新欄位插在預算後面
+        cols = ['name', 'total_budget', 'real_income', 'profit_margin', 'status', 'progress', 'start_date', 'mid_date', 'end_date', 'created_at', '_sheet_row']
+        # 確保這些欄位都存在 (防呆)
+        existing_cols = [c for c in cols if c in df_display.columns]
+        df_display = df_display[existing_cols]
+
         edited_df = st.data_editor(
             df_display, key="proj_editor", num_rows="dynamic", use_container_width=True,
             column_config={
-                "name": "專案名稱", "total_budget": st.column_config.NumberColumn("預算", format="$%d"),
+                "name": "專案名稱", 
+                "total_budget": st.column_config.NumberColumn("預算", format="$%d"),
+                # V35 新增欄位設定 (設定為 Disabled 唯讀)
+                "real_income": st.column_config.NumberColumn("實收(含稅扣除)", format="$%d", disabled=True),
+                "profit_margin": st.column_config.ProgressColumn("利潤比", format="%.1f%%", min_value=-1, max_value=1, disabled=True),
+                
                 "status": st.column_config.SelectboxColumn("狀態", options=["進行中", "結案", "暫停"]),
                 "progress": st.column_config.ProgressColumn("進度", format="%d%%", min_value=0, max_value=100),
                 "start_date": st.column_config.DateColumn("開始日期"), "mid_date": st.column_config.DateColumn("🔸 期中驗收"), "end_date": st.column_config.DateColumn("結束日期"),
-                "created_at": None, "_sheet_row": None 
+                "created_at": None, "_sheet_row": None, "cost_sum": None # 隱藏計算中間值
             }, hide_index=True
         )
         if st.button("💾 儲存專案變更"):
@@ -391,10 +422,8 @@ with tab3:
     st.subheader("📋 帳務總表 (可排序/分組)")
     if not df_trans.empty:
         sort_col_t, sort_sub_col = st.columns([1, 1])
-        # V34 新增：第一層 (檢視模式) + 第二層 (內排序)
         sort_opt_t = sort_col_t.selectbox("📂 檢視模式", ["按月分組 (預設)", "全部清單模式"], index=0)
         
-        # 模式一：按月分組
         if sort_opt_t == "按月分組 (預設)":
             sub_sort_opt = sort_sub_col.selectbox("🔃 分組內排序", ["日期 (新→舊)", "日期 (舊→新)", "金額 (大→小)", "金額 (小→大)", "依歸屬", "依科目"])
             
@@ -404,8 +433,6 @@ with tab3:
             all_editors = {}
             for month in sorted_months:
                 group_df = grouped.get_group(month)
-                
-                # --- V34: 分組內排序邏輯 ---
                 if sub_sort_opt == "日期 (新→舊)": group_df = group_df.sort_values('date', ascending=False)
                 elif sub_sort_opt == "日期 (舊→新)": group_df = group_df.sort_values('date', ascending=True)
                 elif sub_sort_opt == "金額 (大→小)": group_df = group_df.sort_values('amount', ascending=False)
@@ -430,11 +457,8 @@ with tab3:
                         }, hide_index=True
                     )
                     all_editors[month] = group_df
-        
-        # 模式二：全部清單
         else:
             sub_sort_opt = sort_sub_col.selectbox("🔃 清單排序", ["日期 (新→舊)", "金額 (大→小)", "依歸屬", "依科目"])
-            
             if sub_sort_opt == "金額 (大→小)": df_display_t = df_trans.sort_values("amount", ascending=False)
             elif sub_sort_opt == "依歸屬": df_display_t = df_trans.sort_values("project_name")
             elif sub_sort_opt == "依科目": df_display_t = df_trans.sort_values("category")
@@ -460,8 +484,6 @@ with tab3:
                 updates_to_perform = []
                 header_row_t = ws_trans.row_values(1)
                 col_map_t = {name: i+1 for i, name in enumerate(header_row_t)}
-                
-                # 通用儲存邏輯 (支援分組或清單)
                 for key in st.session_state:
                     if key.startswith("editor_"):
                         changes = st.session_state[key]
@@ -482,7 +504,6 @@ with tab3:
                                 if col_name in col_map_t:
                                     if isinstance(new_val, (date, datetime, pd.Timestamp)): new_val = new_val.strftime('%Y-%m-%d')
                                     updates_to_perform.append((real_sheet_row, col_map_t[col_name], new_val))
-                
                 if rows_to_delete:
                     for r in sorted(list(set(rows_to_delete)), reverse=True): ws_trans.delete_rows(r)
                     st.warning("已執行刪除")
