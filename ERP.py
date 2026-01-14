@@ -132,7 +132,7 @@ else:
     m_income = m_expense = m_balance = total_balance = 0
 
 st.set_page_config(page_title="雲端公司中控台", layout="wide", page_icon="💲")
-st.title("☁️ 公司營運中控台 (V36 利潤比校正版)")
+st.title("☁️ 公司營運中控台 (V37 利潤比修正版)")
 
 col1, col2, col3, col4 = st.columns(4)
 col1.metric("📅 本月營收", fmt_num(m_income))
@@ -273,7 +273,7 @@ with tab1:
 
         df_display['real_income'] = (df_display['total_budget'] * 0.95) - df_display['cost_sum']
         
-        # 【修正重點】計算利潤比時乘 100，變成百分比數值 (例如 95.0)
+        # 計算利潤比 (乘100)
         df_display['profit_margin'] = df_display.apply(
             lambda x: (x['real_income'] / x['total_budget'] * 100) if x['total_budget'] > 0 else 0, 
             axis=1
@@ -289,8 +289,8 @@ with tab1:
                 "name": "專案名稱", 
                 "total_budget": st.column_config.NumberColumn("預算", format="$%d"),
                 "real_income": st.column_config.NumberColumn("實收(含稅扣除)", format="$%d", disabled=True),
-                # 【修正重點】範圍設為 -100 到 100，讓進度條以 0 為中心
-                "profit_margin": st.column_config.ProgressColumn("利潤比", format="%.1f%%", min_value=-100, max_value=100),
+                # 【修正】範圍改為 0-100
+                "profit_margin": st.column_config.ProgressColumn("利潤比", format="%.1f%%", min_value=0, max_value=100),
                 
                 "status": st.column_config.SelectboxColumn("狀態", options=["進行中", "結案", "暫停"]),
                 "progress": st.column_config.ProgressColumn("進度", format="%d%%", min_value=0, max_value=100),
