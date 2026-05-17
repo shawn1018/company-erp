@@ -10,7 +10,7 @@ from plotly.subplots import make_subplots
 import time
 
 # ==========================================
-# 1. 系統設定與連線 (含快取)
+# 1. 系統設定與 Google Sheets 連線
 # ==========================================
 st.set_page_config(page_title="雲端公司中控台", layout="wide", page_icon="🚥")
 
@@ -57,12 +57,15 @@ def init_sheets(sheet):
 
 ws_trans, ws_projs, ws_settings = init_sheets(sh)
 
+# --- 資料讀取與快取 ---
 @st.cache_data(ttl=60)
 def load_data(_ws_trans, _ws_projs, _ws_settings):
+    # 讀取交易紀錄
     raw_t = _ws_trans.get_all_values()
     df_t = pd.DataFrame(raw_t[1:], columns=raw_t[0]) if len(raw_t) > 1 else pd.DataFrame(columns=["date", "type", "category", "amount", "note", "project_name", "created_at"])
-    df_t['_sheet_row'] = range(2, len(df_t) + 2)
+    df_t['_sheet_row'] = range(2, len(df_t) + 2) # 記錄 Google Sheet 真實行號
     
+    # 讀取專案
     raw_p = _ws_projs.get_all_values()
     std_p_cols = ["name", "total_budget", "start_date", "status", "progress", "created_at", "end_date", "mid_date"]
     if len(raw_p) > 1:
@@ -72,13 +75,14 @@ def load_data(_ws_trans, _ws_projs, _ws_settings):
     else:
         df_p = pd.DataFrame(columns=std_p_cols + ["_sheet_row"])
         
+    # 讀取設定
     raw_s = _ws_settings.get_all_values()
     c_list = [r[0] for r in raw_s[1:] if len(r)>0 and r[0].strip()!=""]
     a_list = [r[1] for r in raw_s[1:] if len(r)>1 and r[1].strip()!=""]
     return df_t, df_p, c_list, a_list
 
 df_trans, df_projs, cat_list, attr_list = load_data(ws_trans, ws_projs, ws_settings)
-project_options = (attr_list if attr_list else ["公司固定開銷"]) + (df_projs['name'].tolist() if not df_projs.empty else [])
+project_options = attr_list + (df_projs['name'].tolist() if not df_projs.empty else [])
 
 # 格式轉換
 if not df_trans.empty:
@@ -94,18 +98,19 @@ if not df_projs.empty:
     status_map = {"進行中": "🟢 進行中", "待尾款": "🔴 待尾款", "結案": "🔘 結案", "暫停": "🟠 暫停"}
     df_projs['status'] = df_projs['status'].apply(lambda x: status_map.get(x, x))
 
+# 數字美化 (1500 -> $1.5K)
 def fmt_num(num):
     if num is None: return "$0"
     abs_n = abs(num)
-    if abs_n >= 1_000_000: return f"${num/1_000_000:.1f}M"
-    elif abs_n >= 1_000: return f"${num/1_000:.1f}K"
-    else: return f"${num:,.0f}"
+    prefix = "-" if num < 0 else ""
+    if abs_n >= 1_000_000: val = f"${prefix}{abs_n/1_000_000:.1f}M"
+    elif abs_n >= 1_000: val = f"${prefix}{abs_n/1_000:.1f}K"
+    else: val = f"${prefix}{abs_n:,.0f}"
+    return val
 
 # ==========================================
-# 2. 戰情儀表板 (KPI & 圖表)
+# 2. 頂部看板 (KPI & 全景圖)
 # ==========================================
-st.title("☁️ 公司營運中控台 (V45 穩定整合版)")
-
 today = datetime.today()
 m_income = m_expense = m_balance = total_balance = 0
 if not df_trans.empty:
@@ -129,7 +134,7 @@ col4.metric("🏦 總資金水位", fmt_num(total_balance))
 col5.metric("🏆 年度營業額 / 實收", f"{fmt_num(total_budget_sum)} / {fmt_num(total_real_income_sum)}")
 st.divider()
 
-# 全景圖
+# 全景圖繪製
 if not df_trans.empty or not df_projs.empty:
     df_chart_p = df_projs.copy()
     def prep_dates(row):
@@ -189,7 +194,7 @@ tab1, tab2, tab3, tab4 = st.tabs(["🏗 專案管理", "✍️ 雲端記帳", "�
 def save_and_reload():
     st.cache_data.clear(); st.success("已同步雲端！"); time.sleep(1); st.rerun()
 
-# --- Tab 1: 專案管理 ---
+# --- Tab 1: 專案管理 (精準刪除版) ---
 with tab1:
     with st.expander("➕ 新增專案"):
         with st.form("add_p"):
@@ -199,7 +204,7 @@ with tab1:
                 ws_projs.append_row([name, budg, str(s_d), stat, 0, str(datetime.now()), str(e_d), str(m_d) if m_d else ""]); save_and_reload()
     
     if not df_projs.empty:
-        sort_p = st.selectbox("🔃 排序方式", ["依日期", "依金額", "依狀態", "依名稱"])
+        sort_p = st.selectbox("🔃 列表排序方式", ["依建立日期", "依金額", "依狀態", "依名稱"])
         if sort_p=="依金額": df_dp = df_projs.sort_values("total_budget", ascending=False)
         elif sort_p=="依狀態": df_dp = df_projs.sort_values("status")
         elif sort_p=="依名稱": df_dp = df_projs.sort_values("name")
@@ -220,20 +225,21 @@ with tab1:
         if st.button("💾 儲存專案變更"):
             try:
                 ch = st.session_state["p_edit"]; head = ws_projs.row_values(1)
-                if "mid_date" not in head: ws_projs.update_cell(1, len(head)+1, "mid_date")
+                # 處理刪除：依據絕對列號由大到小刪除
                 if ch.get("deleted_rows"):
-                    for r in sorted([int(df_dp.iloc[i]['_sheet_row']) for i in ch["deleted_rows"]], reverse=True): ws_projs.delete_rows(r)
+                    del_rows = [int(df_dp.iloc[i]['_sheet_row']) for i in ch["deleted_rows"]]
+                    for r in sorted(del_rows, reverse=True): ws_projs.delete_rows(r)
+                # 處理修改
                 if ch.get("edited_rows"):
                     col_map = {n: i+1 for i, n in enumerate(head)}
                     t_head = ws_trans.row_values(1); t_col = t_head.index("project_name")+1 if "project_name" in t_head else -1
                     for idx_s, c_dict in ch["edited_rows"].items():
                         idx = int(idx_s); r_row = int(df_dp.iloc[idx]['_sheet_row'])
-                        if "name" in c_dict and t_col != -1:
-                            old = df_dp.iloc[idx]['name']; new = c_dict["name"]
-                            if old!=new:
-                                t_list = ws_trans.col_values(t_col)
-                                for r_i, val in enumerate(t_list):
-                                    if val==old: ws_trans.update_cell(r_i+1, t_col, new)
+                        if "name" in c_dict and t_col != -1: # 連動更名
+                            old_n = df_dp.iloc[idx]['name']; new_n = c_dict["name"]
+                            if old_n != new_n:
+                                for ri, val in enumerate(ws_trans.col_values(t_col)):
+                                    if val==old_n: ws_trans.update_cell(ri+1, t_col, new_n)
                         for cn, v in c_dict.items():
                             if cn in col_map: ws_projs.update_cell(r_row, col_map[cn], str(v) if isinstance(v, (date, datetime)) else v)
                 save_and_reload()
@@ -241,38 +247,34 @@ with tab1:
 
 # --- Tab 2: 雲端記帳 ---
 with tab2:
-    with st.expander("⚙️ 設定清單"):
-        c_a, c_b = st.columns(2)
-        with c_a:
-            st.write("📂 科目管理"); nc = st.text_input("新增科目")
+    with st.expander("⚙️ 設定管理"):
+        ca1, ca2 = st.columns(2)
+        with ca1:
+            nc = st.text_input("新增科目")
             if st.button("➕ 科目"): ws_settings.append_row([nc]); save_and_reload()
             dc = st.selectbox("刪除科目", ["(選取)"]+cat_list)
             if st.button("🗑 科目"): ws_settings.update_cell(ws_settings.find(dc).row, 1, ""); save_and_reload()
-        with c_b:
-            st.write("🏢 歸屬管理"); na = st.text_input("新增歸屬")
+        with ca2:
+            na = st.text_input("新增固定歸屬")
             if st.button("➕ 歸屬"): ws_settings.update_cell(len(attr_list)+2, 2, na); save_and_reload()
             da = st.selectbox("刪除歸屬", ["(選取)"]+attr_list)
             if st.button("🗑 歸屬"): ws_settings.update_cell(ws_settings.find(da).row, 2, ""); save_and_reload()
-    
-    st.write("⚡️ 樣板")
+    st.write("⚡️ 樣板快捷鍵")
     t1, t2 = st.columns(2)
     if t1.button("🏢 房租"): st.session_state.form_cat="房租"; st.session_state.form_note=f"{datetime.now().month}月房租"; st.rerun()
     if t2.button("👥 薪資"): st.session_state.form_cat="薪資"; st.session_state.form_note=f"{datetime.now().month}月薪資"; st.rerun()
-    
     with st.form("add_t"):
-        c1, c2, c3 = st.columns(3); d = c1.date_input("日期"); ty = c2.selectbox("類型",["支出","收入"]); 
-        ca = c3.selectbox("科目", cat_list, index=cat_list.index(st.session_state.get('form_cat')) if st.session_state.get('form_cat') in cat_list else 0)
-        am = st.number_input("金額", min_value=0); pr = st.selectbox("歸屬", project_options)
-        no = st.text_input("備註", value=st.session_state.get('form_note', ''))
+        c1, c2, c3 = st.columns(3); d = c1.date_input("日期"); ty = c2.selectbox("類型",["支出","收入"]); ca = c3.selectbox("科目", cat_list, index=cat_list.index(st.session_state.get('form_cat')) if st.session_state.get('form_cat') in cat_list else 0)
+        am = st.number_input("金額", min_value=0); pr = st.selectbox("歸屬", project_options); no = st.text_input("備註", value=st.session_state.get('form_note', ''))
         if st.form_submit_button("寫入雲端"): 
             ws_trans.append_row([str(d),ty,ca,am,no,pr,str(datetime.now())]); st.session_state.form_note=""; save_and_reload()
 
-# --- Tab 3: 帳務總表 ---
+# --- Tab 3: 帳務總表 (精準刪除版) ---
 with tab3:
     st.subheader("📋 帳務總表")
     if not df_trans.empty:
         c_m1, c_m2 = st.columns(2)
-        m_view = c_m1.radio("📂 檢視模式", ["按月分組", "合併清單模式"], horizontal=True)
+        m_view = c_m1.radio("📂 檢視模式", ["按月分組", "合併清單"], horizontal=True)
         m_sort = c_m2.selectbox("🔃 排序方式", ["日期(新→舊)", "日期(舊→新)", "金額(大→小)", "依科目", "依歸屬"])
         
         def apply_sort(df, opt):
@@ -282,12 +284,13 @@ with tab3:
             if opt == "日期(舊→新)": return df.sort_values("date", ascending=True)
             return df.sort_values("date", ascending=False)
 
+        all_month_dfs = {}
         if m_view == "按月分組":
             df_trans['YM'] = df_trans['date'].dt.strftime('%Y-%m'); g = df_trans.groupby('YM')
-            sorted_m = sorted(g.groups.keys(), reverse=True)
-            for m in sorted_m:
+            for m in sorted(g.groups.keys(), reverse=True):
                 gdf = apply_sort(g.get_group(m), m_sort)
-                mi = gdf[gdf['type']=='收入']['amount'].sum(); me = gdf[gdf['type']=='支出']['amount'].sum()
+                all_month_dfs[m] = gdf
+                mi, me = gdf[gdf['type']=='收入']['amount'].sum(), gdf[gdf['type']=='支出']['amount'].sum()
                 with st.expander(f"📅 {m} | 🟢 +{fmt_num(mi)} | 🔴 -{fmt_num(me)}"):
                     st.data_editor(gdf, key=f"ed_{m}", num_rows="dynamic", use_container_width=True, 
                                    column_config={"date":st.column_config.DateColumn("日期"),"amount":st.column_config.NumberColumn("金額", format="$%d"),
@@ -300,20 +303,21 @@ with tab3:
         
         if st.button("💾 儲存帳務變更"):
             try:
-                head_t = ws_trans.row_values(1); c_map = {n: i+1 for i, n in enumerate(head_t)}
+                head_t = ws_trans.row_values(1); col_map = {n: i+1 for i, n in enumerate(head_t)}
+                rows_to_del = []
                 for k in st.session_state:
                     if k.startswith("ed_"):
                         ch = st.session_state[k]
-                        if k == "ed_all": c_df = df_all
-                        else: c_df = df_trans[df_trans['YM'] == k.replace("ed_","")]
-                        
+                        cur_df = df_all if k == "ed_all" else all_month_dfs[k.replace("ed_","")]
                         if ch.get("deleted_rows"):
-                            for i in sorted(ch["deleted_rows"], reverse=True): ws_trans.delete_rows(int(c_df.iloc[i]['_sheet_row']))
+                            for i in ch["deleted_rows"]: rows_to_del.append(int(cur_df.iloc[i]['_sheet_row']))
                         if ch.get("edited_rows"):
                             for i_s, d_ict in ch["edited_rows"].items():
-                                r_row = int(c_df.iloc[int(i_s)]['_sheet_row'])
+                                idx = int(i_s); r_row = int(cur_df.iloc[idx]['_sheet_row'])
                                 for cn, val in d_ict.items():
-                                    if cn in c_map: ws_trans.update_cell(r_row, c_map[cn], str(val) if isinstance(val, (date, datetime)) else val)
+                                    if cn in col_map: ws_trans.update_cell(r_row, col_map[cn], str(val) if isinstance(val, (date, datetime)) else val)
+                if rows_to_del:
+                    for r in sorted(list(set(rows_to_del)), reverse=True): ws_trans.delete_rows(r)
                 save_and_reload()
             except Exception as e: st.error(f"儲存失敗: {e}")
 
@@ -323,13 +327,13 @@ with tab4:
         t_mode = st.radio("統計範圍", ["單一月份", "年初至今 (YTD)", "全部資料"], horizontal=True)
         df_trans['Year'] = df_trans['date'].dt.year; df_trans['YM'] = df_trans['date'].dt.strftime('%Y-%m')
         if t_mode == "單一月份":
-            sel = st.selectbox("月份", sorted(df_trans['YM'].unique(), reverse=True)); df_f = df_trans[df_trans['YM']==sel]; title=sel
+            sel = st.selectbox("選擇月份", sorted(df_trans['YM'].unique(), reverse=True)); df_f = df_trans[df_trans['YM']==sel]; title=sel
         elif t_mode == "年初至今 (YTD)":
-            sel = st.selectbox("年份", sorted(df_trans['Year'].unique(), reverse=True)); df_f = df_trans[(df_trans['Year']==sel) & (df_trans['date']<=pd.Timestamp(date.today()))]; title=f"{sel} YTD"
-        else: df_f = df_trans; title="全部"
+            sel = st.selectbox("選擇年份", sorted(df_trans['Year'].unique(), reverse=True)); df_f = df_trans[(df_trans['Year']==sel) & (df_trans['date']<=pd.Timestamp(date.today()))]; title=f"{sel} YTD"
+        else: df_f = df_trans; title="全部歷史"
         
         ti = df_f[df_f['type']=='收入']['amount'].sum(); te = df_f[df_f['type']=='支出']['amount'].sum()
-        c1, c2, c3 = st.columns(3); c1.metric("總收入", fmt_num(ti)); c2.metric("總支出", fmt_num(te)); c3.metric("淨損益", fmt_num(ti-te))
+        c1, c2, c3 = st.columns(3); c1.metric(f"{title} 總收入", fmt_num(ti)); c2.metric(f"{title} 總支出", fmt_num(te)); c3.metric(f"{title} 淨利", fmt_num(ti-te))
         ch1, ch2 = st.columns(2)
-        with ch1: st.plotly_chart(px.bar(df_f.groupby(['category','type'])['amount'].sum().reset_index(), x='category', y='amount', color='type', barmode='group', color_discrete_map={'收入':'#00CC96','支出':'#EF553B'}, text_auto='.2s', title=f"{title} 科目統計"), use_container_width=True)
-        with ch2: st.plotly_chart(px.bar(df_f.groupby(['project_name','type'])['amount'].sum().reset_index(), x='project_name', y='amount', color='type', barmode='group', color_discrete_map={'收入':'#00CC96','支出':'#EF553B'}, text_auto='.2s', title=f"{title} 歸屬統計"), use_container_width=True)
+        with ch1: st.plotly_chart(px.bar(df_f.groupby(['category','type'])['amount'].sum().reset_index(), x='category', y='amount', color='type', barmode='group', color_discrete_map={'收入':'#00CC96','支出':'#EF553B'}, text_auto='.2s', title="科目統計"), use_container_width=True)
+        with ch2: st.plotly_chart(px.bar(df_f.groupby(['project_name','type'])['amount'].sum().reset_index(), x='project_name', y='amount', color='type', barmode='group', color_discrete_map={'收入':'#00CC96','支出':'#EF553B'}, text_auto='.2s', title="歸屬統計"), use_container_width=True)
